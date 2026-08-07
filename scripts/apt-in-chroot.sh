@@ -2,6 +2,7 @@
 # Ставит пакеты Debian в корневую ФС телефона. Телефон в TWRP.
 #
 #   scripts/apt-in-chroot.sh mesa-utils mesa-utils-bin
+#   scripts/apt-in-chroot.sh --suite trixie-backports libgl1-mesa-dri
 #
 # У загруженной системы нет ни сети, ни adb, а у TWRP нет сетевых
 # драйверов. Обходим не через USB gadget networking, а проще: TCP-туннель
@@ -23,7 +24,12 @@
 #     ("Not live until ..."). Дату выставляем с хоста перед запуском.
 set -e
 
-[ $# -gt 0 ] || { echo "укажите пакеты: $0 mesa-utils ..." >&2; exit 1; }
+SUITE=""
+if [ "${1:-}" = "--suite" ]; then
+	SUITE="$2"; shift 2
+fi
+
+[ $# -gt 0 ] || { echo "укажите пакеты: $0 [--suite <suite>] mesa-utils ..." >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ADB="$ROOT/build/tools/platform-tools/adb"
@@ -71,6 +77,13 @@ printf '%s\n' \
   > $ROOT_MNT/etc/apt/apt.conf.d/99proxy
 "
 
+if [ -n "$SUITE" ]; then
+	echo ">> подключаю $SUITE"
+	"$ADB" shell "printf '%s\n' \
+	  'deb http://deb.debian.org/debian $SUITE main' \
+	  > $ROOT_MNT/etc/apt/sources.list.d/$SUITE.list"
+fi
+
 echo ">> apt-get update"
 "$ADB" shell "chroot $ROOT_MNT /usr/bin/env -i \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -81,7 +94,7 @@ echo ">> apt-get install $*"
 "$ADB" shell "chroot $ROOT_MNT /usr/bin/env -i \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   HOME=/root TERM=dumb DEBIAN_FRONTEND=noninteractive \
-  apt-get install -y --no-install-recommends $*" 2>&1 | tail -25
+  apt-get install -y --no-install-recommends ${SUITE:+-t $SUITE} $*" 2>&1 | tail -25
 
 "$ADB" shell "sync"
 echo ">> готово"
