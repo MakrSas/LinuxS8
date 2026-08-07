@@ -1082,3 +1082,43 @@ compatible `samsung,exynos8895-ufs`:
 то есть UniPro не отвечает вообще. У нас там шаблон
 `samsung,exynos7-ufs-phy` с тремя фиктивными `&oscclk` вместо настоящих
 symbol-клоков и не проверенным смещением изоляции. Это следующая задача.
+
+### Точная трассировка (журнал с карты, загрузка `85f87901`)
+
+Логи уцелели полностью — телефон выключился штатно, так что читать пришлось
+не фотографии, а текст:
+
+```
+UFSTRACE: E1 vs_hci ioremap ok … E10 config_smu ok - exynos_ufs_init ЗАВЕРШЁН
+UFSTRACE: I2 hba_init ok -> читаем capabilities
+UFSTRACE: ufshcd_hba_enable enter
+UFSTRACE: hce_enable_notify status=0
+UFSTRACE: hce_enable_notify status=1          <- HCE прошёл, контроллер включился
+exynos-ufshc: dme-get: attr-id 0x402 failed 0 retries
+exynos-ufshc: failed to decide pwm clock divider, will not change
+scsi host0: ufshcd
+UFSTRACE: ufshcd_link_startup enter -> pre_link enter
+UFSTRACE: exynos_ufs_phy_init -> phy_init -> power_on -> calibrate
+exynos-ufshc: dme-set: attr-id 0x9540/0x316/0x317/0x35x/0x34x … failed 0 retries
+exynos-ufshc: uic cmd 0x16 with arg3 0x0 completion timeout   (0x16 = DME_LINK_STARTUP)
+exynos-ufshc: link startup failed -110
+```
+
+Что отсюда следует:
+
+- **Ядро контроллера живо:** `config_smu` пропущен, `exynos_ufs_init`
+  завершился, HCE отработал (оба `hce_enable_notify`). Это уже настоящий
+  рабочий UFS-контроллер, а не мёртвое железо.
+- **UniPro не отвечает вообще:** падают все DME-команды, и первая же
+  (`dme-get 0x402`) — по таймауту, ещё до всякого PHY. Дальше `link startup`
+  упирается в `uic cmd 0x16 completion timeout`.
+- **Новая зацепка:** `failed to decide pwm clock divider` печатает
+  `exynos_ufs_calc_pwm_clk_div()`, когда ни один делитель не укладывается в
+  допустимый диапазон при заданном `ufs->mclk_rate`. А `mclk_rate` — это
+  `clk_get_rate(sclk_unipro_main)`. То есть частота UniPro-клока у нас,
+  похоже, неверная, и тогда все тайминги M-PHY считаются мимо.
+
+**Следующий шаг** — снять реальные частоты (`/sys/kernel/debug/clk/clk_summary`,
+пересборка не нужна) и сверить с тем, что ожидает драйвер. Только потом
+браться за PHY: три фиктивных `&oscclk` в его узле никуда не делись, но
+чинить их вслепую до проверки клоков смысла нет.
