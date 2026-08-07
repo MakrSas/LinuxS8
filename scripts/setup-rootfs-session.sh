@@ -142,7 +142,23 @@ Environment=LIBGL_ALWAYS_SOFTWARE=1
 Environment=GALLIUM_DRIVER=llvmpipe
 EOF
 
-# --- 11. Резервная консоль ---------------------------------------------
+# --- 11. Дать GNOME Shell время подняться -------------------------------
+# systemd убивает org.gnome.Shell@wayland.service, если тот не отчитался о
+# готовности за 90 секунд по умолчанию:
+#
+#   org.gnome.Shell@wayland.service: start operation timed out. Terminating.
+#
+# На llvmpipe при 1440x2960 первый кадр рисует процессор, и в 90 секунд это
+# укладывается далеко не всегда — особенно когда параллельно идёт опыт с
+# mdelay-маркерами в ядре и посекундной синхронизацией на карту. Сеанс при
+# этом полностью исправен, его просто не дожидаются.
+mkdir -p /etc/systemd/user/org.gnome.Shell@wayland.service.d
+cat > /etc/systemd/user/org.gnome.Shell@wayland.service.d/timeout.conf <<'EOF'
+[Service]
+TimeoutStartSec=600
+EOF
+
+# --- 12. Резервная консоль ---------------------------------------------
 # Печатать в неё некому и набрать в ней нечего (клавиатуры нет), но если
 # GDM не стартует, живой getty на экране — это хотя бы признак того, что
 # сама система дошла до multi-user.
