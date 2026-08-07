@@ -1920,3 +1920,50 @@ OpenGL ES profile renderer:            Mali-G71 MC20 (Panfrost)
 
 Обратный путь, если GNOME снова замигает: вернуть эти два файла из TWRP,
 перепрошивать ничего не нужно.
+
+### GNOME на GPU не поехал, и упёрлось не в GPU
+
+Со снятым blacklist и без принуждения к софтверному рендеру рабочий стол
+опять замигал. Журнал показывает картину точнее прежнего:
+
+```
+gnome-shell: Added device '/dev/dri/card0' (simpledrm) using atomic mode setting.
+gnome-shell: Failed to open gpu '/dev/dri/card1': No suitable mode setting backend found
+gnome-shell: Created gbm renderer for '/dev/dri/card0'
+gnome-shell: Integrated GPU /dev/dri/card0 selected as primary
+gnome-shell: Couldn't find suitable cursor plane format for /dev/dri/card0, disabling HW cursor
+org.gnome.Shell@wayland.service: Main process exited, code=killed, status=11/SEGV
+```
+
+Читается это так:
+
+- **`card1` (panfrost) mutter отвергает сразу** — и правильно: у panfrost
+  нет modesetting вовсе, это чисто рендерное устройство без вывода на
+  экран;
+- **основным GPU выбирается `card0` — simpledrm.** А simpledrm это не
+  драйвер дисплея, а голый буфер кадра, оставленный загрузчиком: без
+  планов, без аппаратного курсора («disabling HW cursor»), без нормального
+  GBM;
+- дальше `gnome-shell` падает с SEGV, и systemd крутит его по кругу.
+
+**Отсюда главный вывод: даже если бы SEGV не было, толку бы не прибавилось.**
+Mutter создал бы gbm-рендерер на `card0`, то есть рисовал бы всё тем же
+процессором. Аппаратное ускорение рабочего стола упирается не в panfrost и
+не в Mesa — обе части исправны и проверены, — а в то, что **у нас нет
+настоящего KMS-драйвера дисплея.**
+
+Это ровно пункт 6 из плана в [graphics.md](graphics.md), написанный ещё до
+начала работ: «Настроить KMS под панель S8 (DSI, 2960×1440) — потребуется
+собственный DRM-панель драйвер, панели в mainline-ядре пока нет». Он никуда
+не делся и теперь стал следующим по очереди.
+
+Мигание при этом — **не** признак сломанного GPU: panfrost и Mesa
+отработали чисто, что и показал опыт 14.
+
+### Возвращено рабочее состояние
+
+- `software-gl.conf` у gdm3 возвращён (с комментарием, почему);
+- `panfrost` снова в blacklist: сам по себе он исправен, но его появление
+  ломает сеанс GNOME.
+
+Перепрошивки не потребовалось, оба файла лежат в rootfs.
