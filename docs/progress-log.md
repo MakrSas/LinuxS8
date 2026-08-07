@@ -858,3 +858,46 @@ USB-контроллера в mainline DT для этого чипа нет во
 кнопки громкости/питания; вывод — только экран. Всё, что нужно системе,
 готовится заранее из TWRP, а логи надо писать на саму карту (persistent
 journal), иначе после зависания их будет неоткуда взять.
+
+## 2026-08-07 (ночь, продолжение) — переход от тестового init к настоящему systemd
+
+Всё, что ниже, следует из одного факта: **у загруженной системы нет ни
+клавиатуры, ни сети, ни adb**. Поэтому сеанс должен подниматься сам, без
+единого нажатия клавиши, а диагностика — оставаться на карте.
+
+- `/init` в initramfs переписан ([../patches/initramfs/init](../patches/initramfs/init)):
+  диагностические дампы регистров убраны (своё они отработали), вместо
+  `firstboot.sh` — `exec switch_root /mnt/root /sbin/init`. Ожидание
+  появления `mmcblk0p1` сделано циклом до 30 секунд вместо фиксированного
+  `sleep`; служебные ФС переносятся в новый корень через `mount -o move`.
+- Rootfs на карте подготовлен скриптом
+  [../scripts/setup-rootfs-session.sh](../scripts/setup-rootfs-session.sh),
+  выполненным нативно в chroot из TWRP:
+  - **journald `Storage=persistent`** + `/var/log/journal` — единственный
+    способ узнать, что пошло не так; читается из TWRP после перезагрузки;
+  - пользователь `phone` (группы `sudo,video,input,audio,render,plugdev,netdev`)
+    и **автовход GDM** — пароль набрать физически нечем, экранная клавиатура
+    появляется только внутри уже запущенного сеанса GNOME;
+  - `graphical.target` по умолчанию, сеанс — GNOME на Wayland (Xorg не
+    ставился, в `/usr/share/wayland-sessions` только `gnome`);
+  - замаскированы `NetworkManager-wait-online` и
+    `systemd-networkd-wait-online` — сети нет, каждый такой юнит это
+    +90…120 секунд на загрузку;
+  - `LIBGL_ALWAYS_SOFTWARE=1` / `GALLIUM_DRIVER=llvmpipe` — GPU не
+    поддержан ничем, единственный экран это SimpleDRM;
+  - `Restart=no` для `gdm3.service` — иначе при неудаче GDM крутится в
+    вечном перезапуске и затирает экран, не давая ничего прочитать;
+  - `fstab` с `passno=0`: `e2fsprogs` в этот rootfs не ставился, `fsck.ext4`
+    в системе нет, и с `passno=1` `systemd-fsck-root` падал бы каждый раз.
+- Грабли по пути: стоковый `/etc/gdm3/daemon.conf` уже содержит строки
+  `AutomaticLoginEnable = true` **закомментированными**, поэтому проверка
+  «есть ли уже такая строка» срабатывала на комментарий, и автовход тихо не
+  включался. Файл теперь переписывается целиком.
+- Сборка образа сведена в скрипт
+  [../scripts/build-boot.sh](../scripts/build-boot.sh) (initramfs →
+  uniLoader → boot.img через `repack-bootimg.py`). Отдельная тонкость: у
+  uniLoader каталог называется `arch/aarch64`, поэтому `ARCH=arm64` из
+  `toolchain/env.sh` (он для ядра) ломает его сборку — нужен `ARCH=aarch64`.
+- `build/device-backups/boot_gnome.img` (md5 `0ac27812033ffe33e5d3954fc6e2db12`)
+  — штатная правка таймаута + новый initramfs — прошит в `/dev/block/sda7` и
+  побайтово проверен, карта размонтирована начисто, устройство перезагружено.
