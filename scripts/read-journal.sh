@@ -30,5 +30,9 @@ mountpoint -q /external_sd/dev  || mount -o bind /dev /external_sd/dev
 chroot /external_sd /usr/bin/env -i \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   HOME=/root TERM=dumb SYSTEMD_COLORS=0 \
-  journalctl --no-pager --boot=-0 $* 2>&1
+  journalctl --no-pager -D /var/log/journal $* 2>&1
 "
+# -D, а не -b: внутри chroot нет работающего systemd, поэтому journalctl не
+# знает "текущую загрузку" и на любой -b отвечает "No entries". Указываем
+# каталог журналов напрямую, а нужную загрузку выбираем через
+# --list-boots + --boot=<id>.

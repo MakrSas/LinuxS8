@@ -29,6 +29,11 @@ else
 fi
 echo ""
 
+echo "== последние пробы стека (если сэмплер работал) =="
+"$ADB" shell "tail -30 $SD/var/log/dreamlte/stack-samples.txt 2>/dev/null" || echo "  (проб нет)"
+"$ADB" pull "$SD/var/log/dreamlte/stack-samples.txt" "$OUT/stack-samples.txt" >/dev/null 2>&1 || true
+echo ""
+
 echo "== ramoops с прошлой загрузки =="
 "$ADB" shell "ls -1 $SD/var/lib/systemd/pstore/ 2>/dev/null" | tr -d '\r' | while read -r d; do
 	[ -n "$d" ] || continue
