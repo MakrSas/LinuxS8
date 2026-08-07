@@ -66,6 +66,7 @@
 - [docs/boot-chain.md](docs/boot-chain.md) — план загрузки (uniLoader + mainline, запасные варианты).
 - [docs/graphics.md](docs/graphics.md) — план по графическому ускорению (Mali-G71/Panfrost) и открытый блокер.
 - [docs/risks-and-open-questions.md](docs/risks-and-open-questions.md) — открытые риски и вопросы.
+- [docs/NEXT-SESSION.md](docs/NEXT-SESSION.md) — **промпт для продолжения работы в новой сессии** и чек-лист.
 - [docs/ufs-bringup.md](docs/ufs-bringup.md) — **bring-up внутренней памяти (UFS): состояние, что исправлено, что делать дальше.** Самодостаточный документ для продолжения работы.
 - [docs/progress-log.md](docs/progress-log.md) — журнал прогресса по датам.
 
