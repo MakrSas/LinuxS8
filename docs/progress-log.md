@@ -1526,3 +1526,44 @@ initramfs находит на нём корень.
 
 Собрано без предупреждений: `boot_clean1.img`,
 md5 `45769a0f3ece5697fa9b1494e4e38a7e`.
+
+---
+
+## 2026-08-08 — `Failed to mount boot.mount`: разобрано
+
+В журнале каждой загрузки повторялось:
+
+```
+efi: UEFI not found.
+EFI services will not be available.
+...
+systemd[1]: Set up automount boot.automount - EFI System Partition Automount.
+systemd[1]: Mounting boot.mount - EFI System Partition Automount...
+systemd[1]: Failed to mount boot.mount - EFI System Partition Automount.
+```
+
+и так на каждое обращение к `/boot`. Загрузке не мешало, но выглядело
+странно: UEFI на устройстве нет вовсе, о чём ядро сообщает двумя строками
+выше.
+
+Работал `systemd-gpt-auto-generator`. Он смотрит таблицу разделов того
+диска, на котором лежит корень, и ищет раздел с типом GPT «EFI System
+Partition». Разбор GPT (снят с устройства через `dd` и распарсен на хосте)
+дал ответ:
+
+```
+sda7   BOOT       type=ebd0a0a2-b9e5-4433-87c0-68b6b72699c7
+sda29  USERDATA   type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b   <=== ESP
+```
+
+**Samsung пометил USERDATA типом EFI System Partition.** Раньше это никого
+не трогало — раздел просто лежал. Теперь на нём наш корень, генератор
+находит «ESP» на том же диске, заводит `boot.automount` на `/boot`, и
+systemd пытается смонтировать наш собственный корень ещё раз, как vfat.
+
+Лечение: `systemd.gpt_auto=0` в `bootargs`. Менять тип раздела в GPT было
+бы честнее по смыслу, но трогать таблицу разделов ради косметики в логе —
+плохой размен: её читают и S-Boot, и TWRP.
+
+Сборка с этим и со снятой отладкой: `boot_clean2.img`,
+md5 `7734899d1c7402f60ed1e88d54819e44`.
