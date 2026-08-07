@@ -1324,3 +1324,93 @@ device tree**, а не в исходниках драйвера. Узел `ufs@0
 Собрано без предупреждений, прошито `boot_phy8895.img`
 (md5 `b12c3b397a71eaf74397636e6ab03a89`), модули разложены, взведён
 `experiments/07-phy8895.sh`.
+
+---
+
+## 2026-08-08 — UFS заработал: HS-G3 ×2, 64 ГБ, sda1…sda29
+
+Два прогона, и внутренняя память поднялась полностью.
+
+### Прогон 07: линк встал
+
+```
+UFSTRACE: 8895 pre_link: mclk=166562500 pclk=83281250 prd=12
+UFSTRACE: link_startup_notify status=1     <- POST_CHANGE, успех
+UFSTRACE: 8895 post_link готов
+```
+
+Таймаута `uic cmd 0x16` не осталось ни одного. Устройство ответило на UPIU
+(ядро успело прочитать дескрипторы — в дампе видно `dev. quirks=0x10c4`),
+`UIC link state=1`, `Device power mode=1`.
+
+**Что оказалось не при чём.** Обе вендорские записи HCI, на которые
+ставилась главная ставка, лечением не были: чтение регистров ДО загрузки
+драйвера дало `0xFC = 0x00000001` и `0x108 = 0x00000001` — S-Boot
+выставляет их сам. Наши записи оказались подтверждением гипотезы, а не её
+проверкой.
+
+**Побочно подтвердилась таблица PMA.** До загрузки драйвера регистры
+держали `0x11124110 = 0xb5`, `0x11124164 = 0x58`, `0x11124250 = 0xb5` —
+ровно те значения, которые пишет новая таблица, включая линию 1 по шагу
+`0x140`. Значит и адресация, и содержимое верны.
+
+Осталось, стало быть, что-то из: калибровка PMA, шаг между линиями,
+селектор линий RX, период такта PCS 12 нс, снятый `BROKEN_HCE`. Разделять
+их отдельными прогонами не стали — линк встал сразу со всем набором.
+
+### Прогон 07 упёрся в смену режима питания
+
+```
+dme-set: attr-id 0x9540 val 0x1 failed 0 retries (ret=1)   <- PA_DBG_OV_TM
+dme-set: attr-id 0x321 val 0x6 failed 0 retries (ret=1)    <- RX_SYNC_MASK_LENGTH
+pwr ctrl cmd 0x2 with (MIBattribute 0x1571, mode 0x11) failed, host upmcrs:0x0
+```
+
+Ключевое: это **не таймаут**. `ufshcd_uic_pwr_ctrl()` печатает такое
+сообщение уже ПОСЛЕ того, как `wait_for_completion_timeout` вернулся
+успешно, то есть прерывание о завершении смены режима пришло и железо
+операцию выполнило. Плохо прочитался только статус.
+
+У Exynos8895 поля `UPMCRS` в стандартном `HCS[10:8]` нет — оно всегда
+читается нулём. Настоящий результат лежит в регистре UniPro `0x78EC`
+(`UNIP_DME_PWR_IND_RESULT`). Даунстрим включает под это отдельный quirk
+`UFSHCD_QUIRK_GET_UPMCRS_DIRECT`, и включает его ровно для `hw_rev 0004`,
+то есть только для 8895.
+
+Четыре `ret=1` перед этим — `exynos_ufs_config_sync_pattern_mask()`, она
+построена вокруг `PA_DBG_OV_TM` (0x9540), которого у 8895 нет.
+
+### Сделано
+
+- Добавлен хук `vops->get_upmcrs` в `ufs_hba_variant_ops` и флаг
+  `EXYNOS_UFS_OPT_UPMCRS_IN_UNIPRO`. Для всех прочих Exynos поведение бит
+  в бит прежнее: без флага возвращается то же значение из `HCS`.
+- `exynos_ufs_config_sync_pattern_mask()` отключена при
+  `EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR` — тот же флаг уже отключает две
+  соседние функции, построенные вокруг того же гейта.
+
+### Прогон 08: всё поднялось
+
+```
+exynos-ufshc 11120000.ufs: Power mode changed to : FAST series_B G_3 L_2
+scsi 0:0:0:49488: Well-known LUN  SAMSUNG KLUCG4J1ED-B0C1 0003 PQ: 0 ANSI: 6
+scsi 0:0:0:0: Direct-Access       SAMSUNG KLUCG4J1ED-B0C1 0003 PQ: 0 ANSI: 6
+sd 0:0:0:0: [sda] 15616000 4096-byte logical blocks: (64.0 GB/59.6 GiB)
+sd 0:0:0:0: [sda] Write cache: enabled, read cache: enabled, supports DPO and FUA
+sda: sda1 sda2 sda3 ... sda29
+sd 0:0:0:0: [sda] Attached SCSI disk
+sd 0:0:0:1: [sdb] Attached SCSI disk
+```
+
+`FAST series_B G_3 L_2` — HS Gear 3, две линии, серия B: максимум для
+UFSHCI 2.1, а не аварийный режим. Накопитель — Samsung KLUCG4J1ED-B0C1 на
+64 ГБ. Кроме `sda` поднялись служебные LU: `sdb` (4.19 МБ), `sdc` и `sdd`
+(по 8.39 МБ) — загрузочные разделы UFS, плюс три well-known LUN.
+
+Система при этом догрузилась до рабочего стола GNOME как обычно.
+
+### Итог
+
+Bring-up внутренней памяти завершён. Дальше — перенос Debian с microSD на
+`sda29` (USERDATA, 34.5 ГБ, уже ext4), а для этого UFS и PHY должны
+грузиться до монтирования корня: либо `=y` в конфиге, либо в initramfs.
