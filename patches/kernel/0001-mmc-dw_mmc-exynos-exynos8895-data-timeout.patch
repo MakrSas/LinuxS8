@@ -1,0 +1,46 @@
+diff --git a/drivers/mmc/host/dw_mmc-exynos.c b/drivers/mmc/host/dw_mmc-exynos.c
+index 4b76b997d..9b3141534 100644
+--- a/drivers/mmc/host/dw_mmc-exynos.c
++++ b/drivers/mmc/host/dw_mmc-exynos.c
+@@ -640,6 +640,32 @@ static const struct dw_mci_drv_data exynos_drv_data = {
+ 	.prepare_hs400_tuning	= dw_mci_exynos_prepare_hs400_tuning,
+ };
+ 
++/*
++ * Exynos8895 has the extended data timeout timer, in which TMOUT[10:8] is a
++ * multiplier rather than the low bits of the count. The generic encoder in
++ * dw_mci_set_data_timeout() writes the raw count across those bits, so any
++ * count that happens to be a multiple of 8 leaves a multiplier of zero there
++ * and the timeout expires immediately: card identification at 396kHz survives
++ * on a count of 39683, while every sector read at 50MHz lands on 5000000 and
++ * ends in DRTO with TCBCNT == 0.
++ *
++ * DW_MMC_QUIRK_EXTENDED_TMOUT is deliberately not set: it suppresses the DTO
++ * that the quirked controllers do not raise on error, and this one does --
++ * failures here were reported as status 0x20c, DRTO together with DTO.
++ */
++static const struct dw_mci_drv_data exynos8895_drv_data = {
++	.caps			= exynos_dwmmc_caps,
++	.num_caps		= ARRAY_SIZE(exynos_dwmmc_caps),
++	.common_caps		= MMC_CAP_CMD23,
++	.init			= dw_mci_exynos_priv_init,
++	.set_ios		= dw_mci_exynos_set_ios,
++	.parse_dt		= dw_mci_exynos_parse_dt,
++	.execute_tuning		= dw_mci_exynos_execute_tuning,
++	.prepare_hs400_tuning	= dw_mci_exynos_prepare_hs400_tuning,
++	.set_data_timeout	= dw_mci_exynos_set_data_timeout,
++	.get_drto_clks		= dw_mci_exynos_get_drto_clks,
++};
++
+ static const struct dw_mci_drv_data artpec_drv_data = {
+ 	.common_caps		= MMC_CAP_CMD23,
+ 	.init			= dw_mci_exynos_priv_init,
+@@ -667,6 +693,8 @@ static const struct of_device_id dw_mci_exynos_match[] = {
+ 			.data = &exynos_drv_data, },
+ 	{ .compatible = "samsung,exynos7870-dw-mshc-smu",
+ 			.data = &exynos_drv_data, },
++	{ .compatible = "samsung,exynos8895-dw-mshc-smu",
++			.data = &exynos8895_drv_data, },
+ 	{ .compatible = "axis,artpec8-dw-mshc",
+ 			.data = &artpec_drv_data, },
+ 	{},

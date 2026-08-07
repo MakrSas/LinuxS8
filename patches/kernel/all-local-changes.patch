@@ -1,0 +1,633 @@
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
+index 305dc72f9..4f02a52e3 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
+@@ -26,6 +26,18 @@ chosen {
+ 		#size-cells = <1>;
+ 		ranges;
+ 
++		/*
++		 * Bring-up crutch, not a permanent fix: S-Boot leaves FSYS0
++		 * clocks/domains on (it just loaded us off UFS), then the
++		 * kernel's late clk_disable_unused/genpd cleanup switches them
++		 * back off because no mainline driver claims them yet. Proof:
++		 * reading sysreg_fsys0 (0x11020700) from userspace after boot
++		 * gives a bus error, while CMU_FSYS0 itself still reads fine.
++		 * Drop these once the UFS/USB blocks properly claim their
++		 * clocks and power domains.
++		 */
++		bootargs = "clk_ignore_unused pd_ignore_unused console=ttySAC0,115200 console=tty0";
++
+ 		framebuffer: framebuffer@cc000000 {
+ 			compatible = "simple-framebuffer";
+ 			reg = <0 0xcc000000 (1440 * 2960 * 4)>;
+@@ -48,11 +60,20 @@ reserved-memory {
+ 		#size-cells = <1>;
+ 		ranges;
+ 
++		/*
++		 * Enlarged from the upstream 0x8000 and given a pmsg area: the
++		 * framebuffer console is our only output, so when a driver
++		 * wedges the display we go blind even if the kernel is still
++		 * running. ramoops survives a warm reset, so the next boot can
++		 * read back both the kernel log and userspace markers written
++		 * to /dev/pmsg0 from the boot that appeared to hang.
++		 */
+ 		ramoops@92000000 {
+ 			compatible = "ramoops";
+-			reg = <0 0x92000000 0x8000>;
++			reg = <0 0x92000000 0x20000>;
+ 			record-size = <0x4000>;
+-			console-size = <0x4000>;
++			console-size = <0x10000>;
++			pmsg-size = <0x4000>;
+ 		};
+ 
+ 		cont_splash_mem: framebuffer@cc000000 {
+@@ -100,6 +121,73 @@ reg_placeholder: regulator-0 {
+ 		compatible = "regulator-fixed";
+ 		regulator-name = "reg-placeholder";
+ 	};
++
++	/*
++	 * SD card VMMC. This one is real: downstream drives it from a GPIO
++	 * load switch, not the PMIC. Confirmed empirically by dumping the
++	 * running downstream kernel's state from TWRP --
++	 * /sys/kernel/debug/gpio showed "gpio-121 (vmmc) out hi", and the
++	 * bank table puts GPIOs 120-123 on gpb1, so vmmc is gpb1-1.
++	 * Without it the controller inits fine but the card never answers,
++	 * and dw_mmc just walks 400k->300k->200k->100k and gives up.
++	 */
++	reg_sdcard_vmmc: regulator-1 {
++		compatible = "regulator-fixed";
++		regulator-name = "vmmc";
++		regulator-min-microvolt = <2800000>;
++		regulator-max-microvolt = <2800000>;
++		gpio = <&gpb1 1 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++	};
++
++	/*
++	 * SD card VQMMC (bus I/O level). Downstream drives this from an
++	 * actual S2MPS17 LDO, which mainline cannot reach -- there is no
++	 * S2MPS17 driver and no SPEEDY bus driver upstream. uniLoader
++	 * already switches that LDO on to 2.8V before handing over, so
++	 * model it as a fixed always-on rail at the voltage uniLoader sets.
++	 * This is why UHS modes stay off: switching to 1.8V for SDR50/104
++	 * needs real control over that LDO.
++	 */
++	reg_sdcard_vqmmc: regulator-3 {
++		compatible = "regulator-fixed";
++		regulator-name = "vqmmc-fixed";
++		regulator-min-microvolt = <2800000>;
++		regulator-max-microvolt = <2800000>;
++		regulator-always-on;
++	};
++
++	/* Real GPIO-controlled rail (confirmed against downstream source,
++	 * gpg0-0 active-high) — unlike touchscreen/sdcard this isn't a PMIC
++	 * rail, so this one should actually power the chip for real. */
++	reg_ufs_vcc: regulator-2 {
++		compatible = "regulator-fixed";
++		regulator-name = "reg-ufs-vcc";
++		gpio = <&gpg0 0 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++	};
++};
++
++/* 2026-08-07: first attempt (PMU isolation offset left at the exynos7-ufs-phy
++ * driver default, 0x720) hung boot solid — phy-samsung-ufs probed but never
++ * returned. Research (see docs/progress-log.md) found the real Exynos8895
++ * PHY isolation register is 0x724, not 0x720 — the PHY was likely never
++ * actually taken out of isolation, so link-startup polling spun forever.
++ * Re-enabling with samsung,pmu-syscon offset corrected to 0x724 (set on the
++ * ufs_phy node in exynos8895.dtsi) to test that theory. The 4x placeholder
++ * &oscclk on the PHY clocks is still electrically wrong (see that node's own
++ * comment) — expect this may still not fully work, but should behave
++ * differently if the isolation theory is right.
++ */
++&ufs_phy {
++	status = "okay";
++};
++
++&ufs {
++	vcc-supply = <&reg_ufs_vcc>;
++	status = "okay";
+ };
+ 
+ &hsi2c_23 {
+@@ -129,19 +217,56 @@ &mmc {
+ 	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd2_cd>;
+ 	pinctrl-names = "default";
+ 
++	/*
++	 * PIO was tried and ruled out: forcing TRANS_MODE_PIO (see the
++	 * fifo-mode handling added to dw_mmc.c) failed data transfers just
++	 * the same, so the 64-bit IDMAC engine was never the problem. Left
++	 * on the default DMA path.
++	 */
+ 	bus-width = <4>;
++
++	/*
++	 * Not set by dw_mmc-exynos, only ever from DT -- without it
++	 * mmc_sd_switch_hs() never runs and the card is pinned to its
++	 * csd.max_dtr of 25 MHz.
++	 */
++	cap-sd-highspeed;
++
+ 	card-detect-delay = <200>;
+ 	cd-gpios = <&gpa1 5 GPIO_ACTIVE_LOW>;
+ 	clock-frequency = <800000000>;
+ 	disable-wp;
+-	sd-uhs-sdr50;
+-	sd-uhs-sdr104;
+-
+-	/* TODO: Add regulators once PMIC is implemented */
++	/* UHS voltage switching (SDR50/SDR104) needs a real, switchable
++	 * vqmmc regulator — reg_placeholder is a bare always-on fixed
++	 * regulator, not voltage-adjustable. Drop UHS for now so we don't
++	 * depend on that; plain high-speed still gives working storage. */
++
++	vmmc-supply = <&reg_sdcard_vmmc>;
++	vqmmc-supply = <&reg_sdcard_vqmmc>;
++
++	/*
++	 * Without pinning the divider the SoC dtsi's mux-only assignment
++	 * leaves CIU at 666.25/4 = 166.5625 MHz, so bus_hz lands on the odd
++	 * 41.64 MHz seen in dmesg. shared2_pll is exactly 800 MHz, giving
++	 * CIU 200 MHz and bus_hz 50 MHz -- the same operating point the
++	 * vendor kernel uses, which is what makes its tuned phase values
++	 * below mean the same thing here.
++	 */
++	assigned-clocks = <&cmu_top CLK_MOUT_CMU_FSYS1_MMC_CARD>,
++			  <&cmu_top CLK_DOUT_CMU_FSYS1_MMC_CARD>;
++	assigned-clock-parents = <&cmu_top CLK_FOUT_SHARED2_PLL>, <0>;
++	assigned-clock-rates = <0>, <800000000>;
+ 
+ 	samsung,dw-mshc-ciu-div = <3>;
+ 	samsung,dw-mshc-ddr-timing = <1 2>;
+-	samsung,dw-mshc-sdr-timing = <0 3>;
++	/*
++	 * SDMMC_CLKSEL_TIMING() packs these as sample=timing[0],
++	 * drive=timing[1] -- the opposite of what the binding's "tx/rx"
++	 * wording suggests. The vendor kernel's tuning log prints
++	 * CLKSEL = 0x03030003, i.e. sample=3 drive=3, so <0 3> (sample=0)
++	 * was wrong here.
++	 */
++	samsung,dw-mshc-sdr-timing = <3 3>;
+ 
+ 	status = "okay";
+ };
+@@ -194,3 +319,24 @@ &usi9 {
+ 	samsung,mode = <USI_MODE_I2C0_1>;
+ 	status = "okay";
+ };
++
++/*
++ * exynos8895-pinctrl.dtsi leaves the SD card's CMD and DAT lines at
++ * PULL_NONE, which no other Exynos in-tree does (exynos7420, exynos5433 and
++ * exynos7870 all pull the DAT lines up, and the vendor kernels use pud=3
++ * universally for sd2). Floating DAT lines fit the observed failure exactly:
++ * short reads during card identification succeed, but every 512-byte sector
++ * read fails -- with CRC errors at 20.8 MHz and with no start bit seen at
++ * all at 3.47 MHz.
++ */
++&sd2_cmd {
++	samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++};
++
++&sd2_bus1 {
++	samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++};
++
++&sd2_bus4 {
++	samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++};
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index ff114cd6c..467119214 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -1433,6 +1433,18 @@ mmc: mmc@11500000 {
+ 			clocks = <&cmu_fsys1 CLK_GOUT_FSYS1_MMC_CARD_I_ACLK>,
+ 				 <&cmu_fsys1 CLK_GOUT_FSYS1_MMC_CARD_SDCLKIN>;
+ 			clock-names = "biu", "ciu";
++			/*
++			 * Declared rather than autodetected: the driver's
++			 * fallback infers the depth from the reset value of
++			 * FIFOTH's RX_WMark field, which only holds if no
++			 * bootloader ever wrote that register.
++			 *
++			 * This value does not bear on the sector-read DRTO.
++			 * dw_mci_ctrl_thld() programs CDTHRCTL only for
++			 * HS200/SDR104/HS400 and writes 0 for everything
++			 * else, so in SD high-speed the card read threshold
++			 * is disabled and fifo_depth is never consulted.
++			 */
+ 			fifo-depth = <64>;
+ 			interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH>;
+ 			#address-cells = <1>;
+@@ -1440,6 +1452,50 @@ mmc: mmc@11500000 {
+ 			status = "disabled";
+ 		};
+ 
++		/*
++		 * Experimental: no dedicated PHY symbol clocks
++		 * (tx0/rx0/rx1_symbol_clk) are exposed by the exynos8895
++		 * clock driver yet, only ref_clk (oscclk) is real here — the
++		 * other three are placeholders reusing oscclk so
++		 * devm_clk_bulk_get() succeeds at all. Expect this to be
++		 * electrically wrong; see docs/progress-log.md.
++		 *
++		 * PMU isolation offset overridden to 0x724 (confirmed against
++		 * downstream: DT literal 0x16480724 under the ufs-phy-sys
++		 * subnode, and the write site in downstream ufs-exynos.c
++		 * exynos_ufs_ctrl_phy_pwr()) — the exynos7-ufs-phy driver's
++		 * own default (0x720) is Exynos7420's register, not ours.
++		 * Previous boot attempt with the 0x720 default hung solid;
++		 * this is the leading suspect why. See docs/progress-log.md.
++		 */
++		ufs_phy: phy@11124000 {
++			compatible = "samsung,exynos7-ufs-phy";
++			reg = <0x11124000 0x800>;
++			reg-names = "phy-pma";
++			samsung,pmu-syscon = <&pmu_system_controller 0x724>;
++			#phy-cells = <0>;
++			clocks = <&oscclk>, <&oscclk>, <&oscclk>, <&oscclk>;
++			clock-names = "ref_clk", "rx1_symbol_clk",
++				      "rx0_symbol_clk", "tx0_symbol_clk";
++			status = "disabled";
++		};
++
++		ufs: ufs@11120000 {
++			compatible = "samsung,exynos7-ufs";
++			reg = <0x11120000 0x200>,
++			      <0x11121100 0x200>,
++			      <0x11110000 0x8000>,
++			      <0x11130000 0x100>;
++			reg-names = "hci", "vs_hci", "unipro", "ufsp";
++			interrupts = <GIC_SPI 334 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&cmu_fsys0 CLK_GOUT_FSYS0_UFS_EMBD_I_ACLK>,
++				 <&cmu_fsys0 CLK_GOUT_FSYS0_UFS_EMBD_I_CLK_UNIPRO>;
++			clock-names = "core_clk", "sclk_unipro_main";
++			phys = <&ufs_phy>;
++			phy-names = "ufs-phy";
++			status = "disabled";
++		};
++
+ 		pinctrl_abox: pinctrl@13e60000 {
+ 			compatible = "samsung,exynos8895-pinctrl";
+ 			reg = <0x13e60000 0x1000>;
+diff --git a/drivers/mmc/host/dw_mmc-exynos.c b/drivers/mmc/host/dw_mmc-exynos.c
+index 4b76b997d..9b3141534 100644
+--- a/drivers/mmc/host/dw_mmc-exynos.c
++++ b/drivers/mmc/host/dw_mmc-exynos.c
+@@ -640,6 +640,32 @@ static const struct dw_mci_drv_data exynos_drv_data = {
+ 	.prepare_hs400_tuning	= dw_mci_exynos_prepare_hs400_tuning,
+ };
+ 
++/*
++ * Exynos8895 has the extended data timeout timer, in which TMOUT[10:8] is a
++ * multiplier rather than the low bits of the count. The generic encoder in
++ * dw_mci_set_data_timeout() writes the raw count across those bits, so any
++ * count that happens to be a multiple of 8 leaves a multiplier of zero there
++ * and the timeout expires immediately: card identification at 396kHz survives
++ * on a count of 39683, while every sector read at 50MHz lands on 5000000 and
++ * ends in DRTO with TCBCNT == 0.
++ *
++ * DW_MMC_QUIRK_EXTENDED_TMOUT is deliberately not set: it suppresses the DTO
++ * that the quirked controllers do not raise on error, and this one does --
++ * failures here were reported as status 0x20c, DRTO together with DTO.
++ */
++static const struct dw_mci_drv_data exynos8895_drv_data = {
++	.caps			= exynos_dwmmc_caps,
++	.num_caps		= ARRAY_SIZE(exynos_dwmmc_caps),
++	.common_caps		= MMC_CAP_CMD23,
++	.init			= dw_mci_exynos_priv_init,
++	.set_ios		= dw_mci_exynos_set_ios,
++	.parse_dt		= dw_mci_exynos_parse_dt,
++	.execute_tuning		= dw_mci_exynos_execute_tuning,
++	.prepare_hs400_tuning	= dw_mci_exynos_prepare_hs400_tuning,
++	.set_data_timeout	= dw_mci_exynos_set_data_timeout,
++	.get_drto_clks		= dw_mci_exynos_get_drto_clks,
++};
++
+ static const struct dw_mci_drv_data artpec_drv_data = {
+ 	.common_caps		= MMC_CAP_CMD23,
+ 	.init			= dw_mci_exynos_priv_init,
+@@ -667,6 +693,8 @@ static const struct of_device_id dw_mci_exynos_match[] = {
+ 			.data = &exynos_drv_data, },
+ 	{ .compatible = "samsung,exynos7870-dw-mshc-smu",
+ 			.data = &exynos_drv_data, },
++	{ .compatible = "samsung,exynos8895-dw-mshc-smu",
++			.data = &exynos8895_drv_data, },
+ 	{ .compatible = "axis,artpec8-dw-mshc",
+ 			.data = &artpec_drv_data, },
+ 	{},
+diff --git a/drivers/mmc/host/dw_mmc.c b/drivers/mmc/host/dw_mmc.c
+index d734d0104..057f56097 100644
+--- a/drivers/mmc/host/dw_mmc.c
++++ b/drivers/mmc/host/dw_mmc.c
+@@ -1830,7 +1830,39 @@ static int dw_mci_data_complete(struct dw_mci *host, struct mmc_data *data)
+ 			data->error = -EILSEQ;
+ 		}
+ 
+-		dev_dbg(host->dev, "data error, status 0x%08x\n", status);
++		/*
++		 * The opcode and R1 separate a host-side fault from the card
++		 * refusing the transfer: R1 bit 25 CARD_IS_LOCKED, bit 31
++		 * OUT_OF_RANGE, bit 30 ADDRESS_ERROR, and the current state in
++		 * bits 12:9 (4 == tran) are all invisible otherwise, because
++		 * dw_mmc never inspects the response of a data command.
++		 */
++		dev_err(host->dev, "data err %08x cmd%u arg %08x r1 %08x\n",
++			status, data->mrq->cmd->opcode, data->mrq->cmd->arg,
++			data->mrq->cmd->resp[0]);
++
++		/*
++		 * TCBCNT/TBBCNT are the only witnesses to whether any data
++		 * crossed the card interface at all: TCBCNT counts bytes the
++		 * CIU moved to/from the card, TBBCNT bytes the BIU moved
++		 * to/from the FIFO. Both have to be sampled here, before the
++		 * dw_mci_reset() below clears them. DRTO with tcb == 0 means
++		 * the card never drove a start bit; tcb == blksz would mean it
++		 * sent the block and the timeout has some other cause.
++		 *
++		 * Rate-limited because the block layer retries every failing
++		 * sector and the console is being read off a photograph.
++		 */
++		if (host->dbg_data_err++ < 3) {
++			dev_err(host->dev, "  tcb %u tbb %u sts %08x cmd %08x blk %u/%u\n",
++				mci_readl(host, TCBCNT), mci_readl(host, TBBCNT),
++				mci_readl(host, STATUS), mci_readl(host, CMD),
++				mci_readl(host, BLKSIZ), mci_readl(host, BYTCNT));
++			dev_err(host->dev, "  ctrl %08x ctype %08x clkena %08x clkdiv %08x tmout %08x fifoth %08x\n",
++				mci_readl(host, CTRL), mci_readl(host, CTYPE),
++				mci_readl(host, CLKENA), mci_readl(host, CLKDIV),
++				mci_readl(host, TMOUT), mci_readl(host, FIFOTH));
++		}
+ 
+ 		/*
+ 		 * After an error, there may be data lingering
+@@ -2919,6 +2951,19 @@ static void dw_mci_init_dma(struct dw_mci *host)
+ 	* simpler request/acknowledge handshake mechanism and both of them
+ 	* are regarded as external dma master for dw_mmc.
+ 	*/
++	/*
++	 * The binding documents "fifo-mode" as "Enables FIFO mode, i.e. PIO"
++	 * but nothing here ever honoured it -- the transfer mode is taken
++	 * purely from HCON. Needed on exynos8895-dreamlte, where IDMAC in
++	 * 64-bit mode fails every data transfer (commands are fine, so the
++	 * card enumerates and then every read returns -EIO) on a board whose
++	 * RAM extends past 4G.
++	 */
++	if (device_property_read_bool(host->dev, "fifo-mode")) {
++		dev_info(host->dev, "fifo-mode requested, using PIO\n");
++		goto no_dma;
++	}
++
+ 	host->use_dma = SDMMC_GET_TRANS_MODE(mci_readl(host, HCON));
+ 	if (host->use_dma == DMA_INTERFACE_IDMA) {
+ 		host->use_dma = TRANS_MODE_IDMAC;
+diff --git a/drivers/mmc/host/dw_mmc.h b/drivers/mmc/host/dw_mmc.h
+index 9ffcd3946..a79302e92 100644
+--- a/drivers/mmc/host/dw_mmc.h
++++ b/drivers/mmc/host/dw_mmc.h
+@@ -166,6 +166,7 @@ struct dw_mci {
+ 	u32			data_addr_override;
+ 	u32			dma_threshold;
+ 	bool			wm_aligned;
++	unsigned int		dbg_data_err;	/* rate-limits the data error dump */
+ 
+ 	struct scatterlist	*sg;
+ 	struct sg_mapping_iter	sg_miter;
+diff --git a/drivers/phy/samsung/phy-samsung-ufs.c b/drivers/phy/samsung/phy-samsung-ufs.c
+index ee665f26c..1855b90cb 100644
+--- a/drivers/phy/samsung/phy-samsung-ufs.c
++++ b/drivers/phy/samsung/phy-samsung-ufs.c
+@@ -47,6 +47,7 @@ void samsung_ufs_phy_config(struct samsung_ufs_phy *phy,
+ 
+ int samsung_ufs_phy_wait_for_lock_acq(struct phy *phy, u8 lane)
+ {
++	pr_emerg("UFSTRACE: wait_for_lock_acq enter (SPINS IF PHY DEAD)\n");
+ 	struct samsung_ufs_phy *ufs_phy = get_samsung_ufs_phy(phy);
+ 	const unsigned int timeout_us = 100000;
+ 	const unsigned int sleep_us = 10;
+@@ -75,6 +76,7 @@ int samsung_ufs_phy_wait_for_lock_acq(struct phy *phy, u8 lane)
+ 
+ static int samsung_ufs_phy_calibrate(struct phy *phy)
+ {
++	pr_emerg("UFSTRACE: calibrate enter\n");
+ 	struct samsung_ufs_phy *ufs_phy = get_samsung_ufs_phy(phy);
+ 	const struct samsung_ufs_phy_cfg * const *cfgs = ufs_phy->cfgs;
+ 	const struct samsung_ufs_phy_cfg *cfg;
+@@ -163,6 +165,7 @@ static int samsung_ufs_phy_clks_init(struct samsung_ufs_phy *phy)
+ 
+ static int samsung_ufs_phy_init(struct phy *phy)
+ {
++	pr_emerg("UFSTRACE: phy_init enter\n");
+ 	struct samsung_ufs_phy *ss_phy = get_samsung_ufs_phy(phy);
+ 
+ 	ss_phy->lane_cnt = phy->attrs.bus_width;
+@@ -173,6 +176,7 @@ static int samsung_ufs_phy_init(struct phy *phy)
+ 
+ static int samsung_ufs_phy_power_on(struct phy *phy)
+ {
++	pr_emerg("UFSTRACE: power_on enter\n");
+ 	struct samsung_ufs_phy *ss_phy = get_samsung_ufs_phy(phy);
+ 	int ret;
+ 
+@@ -288,6 +292,7 @@ static int samsung_ufs_phy_probe(struct platform_device *pdev)
+ 	u32 isol_offset;
+ 	int err = 0;
+ 
++	pr_emerg("UFSTRACE: probe enter\n");
+ 	match = of_match_node(samsung_ufs_phy_match, dev->of_node);
+ 	if (!match) {
+ 		err = -EINVAL;
+@@ -301,12 +306,14 @@ static int samsung_ufs_phy_probe(struct platform_device *pdev)
+ 		goto out;
+ 	}
+ 
++	pr_emerg("UFSTRACE: before ioremap pma\n");
+ 	phy->reg_pma = devm_platform_ioremap_resource_byname(pdev, "phy-pma");
+ 	if (IS_ERR(phy->reg_pma)) {
+ 		err = PTR_ERR(phy->reg_pma);
+ 		goto out;
+ 	}
+ 
++	pr_emerg("UFSTRACE: before syscon lookup\n");
+ 	phy->reg_pmu = syscon_regmap_lookup_by_phandle(dev->of_node,
+ 						       "samsung,pmu-syscon");
+ 	if (IS_ERR(phy->reg_pmu)) {
+@@ -315,6 +322,7 @@ static int samsung_ufs_phy_probe(struct platform_device *pdev)
+ 		goto out;
+ 	}
+ 
++	pr_emerg("UFSTRACE: before phy_create\n");
+ 	gen_phy = devm_phy_create(dev, NULL, &samsung_ufs_phy_ops);
+ 	if (IS_ERR(gen_phy)) {
+ 		err = PTR_ERR(gen_phy);
+@@ -335,6 +343,7 @@ static int samsung_ufs_phy_probe(struct platform_device *pdev)
+ 
+ 	phy->lane_cnt = PHY_DEF_LANE_CNT;
+ 
++	pr_emerg("UFSTRACE: before clks_init\n");
+ 	err = samsung_ufs_phy_clks_init(phy);
+ 	if (err) {
+ 		dev_err(dev, "failed to get phy clocks\n");
+@@ -343,6 +352,7 @@ static int samsung_ufs_phy_probe(struct platform_device *pdev)
+ 
+ 	phy_set_drvdata(gen_phy, phy);
+ 
++	pr_emerg("UFSTRACE: before provider_register\n");
+ 	phy_provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
+ 	if (IS_ERR(phy_provider)) {
+ 		err = PTR_ERR(phy_provider);
+diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
+index 13e6357a8..cf3ced398 100644
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -5114,6 +5114,7 @@ static int ufshcd_hba_execute_hce(struct ufs_hba *hba)
+ 
+ int ufshcd_hba_enable(struct ufs_hba *hba)
+ {
++	pr_emerg("UFSTRACE: ufshcd_hba_enable enter\n");
+ 	int ret;
+ 
+ 	if (hba->quirks & UFSHCI_QUIRK_BROKEN_HCE) {
+@@ -5243,6 +5244,7 @@ static int ufshcd_validate_link_params(struct ufs_hba *hba)
+  */
+ static int ufshcd_link_startup(struct ufs_hba *hba)
+ {
++	pr_emerg("UFSTRACE: ufshcd_link_startup enter\n");
+ 	int ret;
+ 	int retries = DME_LINKSTARTUP_RETRIES;
+ 	bool link_startup_again = false;
+@@ -9402,6 +9404,7 @@ static int ufshcd_device_init(struct ufs_hba *hba, bool init_dev_params)
+  */
+ static int ufshcd_probe_hba(struct ufs_hba *hba, bool init_dev_params)
+ {
++	pr_emerg("UFSTRACE: ufshcd_probe_hba enter\n");
+ 	int ret;
+ 
+ 	if (!hba->pm_op_in_progress &&
+@@ -11058,6 +11061,7 @@ static int ufshcd_add_scsi_host(struct ufs_hba *hba)
+  */
+ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
+ {
++	pr_emerg("UFSTRACE: ufshcd_init enter\n");
+ 	int err;
+ 	struct Scsi_Host *host = hba->host;
+ 	struct device *dev = hba->dev;
+diff --git a/drivers/ufs/host/ufs-exynos.c b/drivers/ufs/host/ufs-exynos.c
+index b2f65c465..4df092446 100644
+--- a/drivers/ufs/host/ufs-exynos.c
++++ b/drivers/ufs/host/ufs-exynos.c
+@@ -1026,6 +1026,7 @@ static void exynos_ufs_specify_nexus_t_tm_req(struct ufs_hba *hba,
+ 
+ static int exynos_ufs_phy_init(struct exynos_ufs *ufs)
+ {
++	pr_emerg("UFSTRACE: exynos_ufs_phy_init enter\n");
+ 	struct ufs_hba *hba = ufs->hba;
+ 	struct phy *generic_phy = ufs->phy;
+ 	int ret = 0;
+@@ -1131,6 +1132,7 @@ static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
+ 
+ static int exynos_ufs_pre_link(struct ufs_hba *hba)
+ {
++	pr_emerg("UFSTRACE: pre_link enter\n");
+ 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+ 
+ 	/* hci */
+@@ -1174,6 +1176,7 @@ static void exynos_ufs_fit_aggr_timeout(struct exynos_ufs *ufs)
+ 
+ static int exynos_ufs_post_link(struct ufs_hba *hba)
+ {
++	pr_emerg("UFSTRACE: post_link enter\n");
+ 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+ 	struct phy *generic_phy = ufs->phy;
+ 	struct exynos_ufs_uic_attr *attr = ufs->drv_data->uic_attr;
+@@ -1532,6 +1535,7 @@ static void exynos_ufs_fmp_resume(struct ufs_hba *hba)
+ 
+ static int exynos_ufs_init(struct ufs_hba *hba)
+ {
++	pr_emerg("UFSTRACE: exynos_ufs_init enter\n");
+ 	struct device *dev = hba->dev;
+ 	struct platform_device *pdev = to_platform_device(dev);
+ 	struct exynos_ufs *ufs;
+@@ -1701,6 +1705,7 @@ static void exynos_ufs_post_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
+ static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
+ 					enum ufs_notify_change_status status)
+ {
++	pr_emerg("UFSTRACE: hce_enable_notify status=%d\n", status);
+ 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+ 	int ret = 0;
+ 
+@@ -1742,6 +1747,7 @@ static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
+ static int exynos_ufs_link_startup_notify(struct ufs_hba *hba,
+ 					  enum ufs_notify_change_status status)
+ {
++	pr_emerg("UFSTRACE: link_startup_notify status=%d\n", status);
+ 	int ret = 0;
+ 
+ 	switch (status) {
+@@ -2126,6 +2132,7 @@ static struct ufs_hba_variant_ops ufs_hba_exynosauto_vh_ops = {
+ 
+ static int exynos_ufs_probe(struct platform_device *pdev)
+ {
++	pr_emerg("UFSTRACE: exynos_ufs_probe enter\n");
+ 	int err;
+ 	struct device *dev = &pdev->dev;
+ 	const struct ufs_hba_variant_ops *vops = &ufs_hba_exynos_ops;
+diff --git a/drivers/ufs/host/ufshcd-pltfrm.c b/drivers/ufs/host/ufshcd-pltfrm.c
+index c2dafb583..f67c548dc 100644
+--- a/drivers/ufs/host/ufshcd-pltfrm.c
++++ b/drivers/ufs/host/ufshcd-pltfrm.c
+@@ -501,10 +501,12 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
+ 	if (IS_ERR(mmio_base))
+ 		return PTR_ERR(mmio_base);
+ 
++	pr_emerg("UFSTRACE: P1 ioremap done\n");
+ 	irq = platform_get_irq(pdev, 0);
+ 	if (irq < 0)
+ 		return irq;
+ 
++	pr_emerg("UFSTRACE: P2 get_irq done\n");
+ 	err = ufshcd_alloc_host(dev, &hba);
+ 	if (err) {
+ 		dev_err(dev, "Allocation failed\n");
+@@ -513,12 +515,14 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
+ 
+ 	hba->vops = vops;
+ 
++	pr_emerg("UFSTRACE: P3 alloc_host done\n");
+ 	err = ufshcd_parse_clock_info(hba);
+ 	if (err) {
+ 		dev_err(dev, "%s: clock parse failed %d\n",
+ 				__func__, err);
+ 		return err;
+ 	}
++	pr_emerg("UFSTRACE: P4 parse_clock done\n");
+ 	err = ufshcd_parse_regulator_info(hba);
+ 	if (err) {
+ 		dev_err(dev, "%s: regulator init failed %d\n",
+@@ -526,14 +530,17 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
+ 		return err;
+ 	}
+ 
++	pr_emerg("UFSTRACE: P5 parse_regulator done\n");
+ 	ufshcd_init_lanes_per_dir(hba);
+ 
++	pr_emerg("UFSTRACE: P6 lanes_per_dir done\n");
+ 	err = ufshcd_parse_operating_points(hba);
+ 	if (err) {
+ 		dev_err(dev, "%s: OPP parse failed %d\n", __func__, err);
+ 		return err;
+ 	}
+ 
++	pr_emerg("UFSTRACE: P7 parse_opp done -> calling ufshcd_init\n");
+ 	err = ufshcd_init(hba, mmio_base, irq);
+ 	if (err) {
+ 		dev_err_probe(dev, err, "Initialization failed with error %d\n",

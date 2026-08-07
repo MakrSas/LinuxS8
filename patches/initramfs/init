@@ -1,0 +1,114 @@
+#!/bin/busybox sh
+/bin/busybox --install -s /bin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+
+# UFS is parked on purpose. With the exynos7 template it wedges at a
+# different point every boot, which means it needs real Exynos8895 support
+# rather than more guessing -- that is its own project. Nothing here loads
+# it, so this boot cannot hang the way the last several did.
+#
+# microSD is the cheap route to the same goal: dw_mmc is built into the
+# kernel, and the SD controller was dead for exactly the reason we fixed
+# today (its VERID read 0x0 before clk_ignore_unused, 0x5342270a after).
+dmesg -n 1
+sleep 6            # card detect + card init need a moment
+clear
+
+echo "=== dreamlte: microSD check (no UFS loaded) ==="
+echo ""
+echo "dwmmc VERID = $(devmem 0x1150006c 32)"
+echo ""
+echo "-- block devices seen by the kernel:"
+grep -E "mmcblk|sd[a-z]" /proc/partitions || echo "   (none)"
+echo ""
+echo "-- card:"
+for c in /sys/class/mmc_host/mmc*/mmc*:*/; do
+	[ -d "$c" ] || continue
+	echo "   name=$(cat $c/name 2>/dev/null) serial=$(cat $c/serial 2>/dev/null)"
+done
+[ -d /sys/class/mmc_host/mmc0 ] || echo "   (no mmc host at all)"
+echo ""
+echo "-- what the kernel said about mmc (unfiltered tail):"
+dmesg | grep -iE "mmc|blk|error|timeout|I/O" | tail -18
+echo ""
+# Did the DAT pull-ups actually take effect? Assume nothing: read the pin
+# state back rather than trusting that the DT override applied.
+echo "-- SD pin config (gpj0-1..5 = CMD + DAT0-3), want pull-up:"
+grep -E "gpj0-[1-5]" /sys/kernel/debug/pinctrl/*/pinconf-pins 2>/dev/null | head -6 \
+	|| echo "   (pinconf-pins unavailable)"
+echo ""
+
+echo "-- can we actually READ from the card? (this is the real question)"
+if dd if=/dev/mmcblk0 of=/tmp/sec0.bin bs=512 count=1 2>/tmp/dd.err; then
+	echo "   sector 0 read OK, first bytes:"
+	hexdump -C /tmp/sec0.bin | head -2
+	echo "   MBR signature: $(hexdump -s 510 -n 2 -e '2/1 "%02x"' /tmp/sec0.bin)  (expect 55aa)"
+else
+	echo "   READ FAILED: $(cat /tmp/dd.err)"
+	echo "   --- driver's verdict ---"
+	dmesg | grep -iE "data error|status 0x|drto|dcrc|response err" | tail -6
+fi
+echo ""
+
+# pinctrl_fsys1 is at 0x11430000 and holds two banks: gpj1 at offset 0x000
+# and gpj0 at 0x020 (per exynos8895_pin_banks4). So gpj0 CON=+0x20,
+# PUD=+0x28, DRV=+0x2c. Each pin owns 2 bits of PUD; 3 = pull-up. Pins 0..5
+# are CLK, CMD, DAT0-3, and CON gives each pin 4 bits; function 2 = SD.
+echo "-- gpj0 pin registers (real addresses this time):"
+echo "   CON 0x11430020 = $(devmem 0x11430020 32)   (want 0x00222222 = func 2)"
+echo "   PUD 0x11430028 = $(devmem 0x11430028 32)   (want 0x00000ffc = CMD+DAT up)"
+echo "   DRV 0x1143002c = $(devmem 0x1143002c 32)"
+echo ""
+
+# The failure is DRTO (status 0x20c, bit 9) = the card never started sending
+# data at all -- not corrupted data. Short reads during identification (SCR,
+# SSR, SWITCH) work; only sector-addressed 512-byte reads fail. That split is
+# exactly what the controller's Security Management Unit gates, so check
+# whether the driver's "allow everything" write actually stuck. Registers are
+# at controller base + 0x1000.
+echo "-- SMU (sector access gate) state:"
+echo "   MPSECURITY 0x11501010 = $(devmem 0x11501010 32)"
+echo "   MPSBEGIN0  0x11501200 = $(devmem 0x11501200 32)   (want 0x0)"
+echo "   MPSEND0    0x11501204 = $(devmem 0x11501204 32)   (want 0xFFFFFFFF)"
+echo "   MPSCTRL0   0x1150120c = $(devmem 0x1150120c 32)   (want 0x71)"
+echo ""
+echo "-- rewriting them by hand and retrying the read:"
+devmem 0x11501200 32 0x00000000
+devmem 0x11501204 32 0xFFFFFFFF
+devmem 0x1150120c 32 0x00000071
+echo "   readback MPSCTRL0 = $(devmem 0x1150120c 32)"
+if dd if=/dev/mmcblk0 of=/tmp/s2.bin bs=512 count=1 2>/tmp/dd2.err; then
+	echo "   *** READ OK AFTER SMU REWRITE -- that was it ***"
+	hexdump -C /tmp/s2.bin | head -2
+else
+	echo "   still failing: $(cat /tmp/dd2.err)"
+	dmesg | grep -iE "data error|status 0x" | tail -3
+fi
+echo ""
+
+echo "-- looking for a Debian rootfs:"
+mkdir -p /mnt/root
+for dev in /dev/mmcblk0p1 /dev/mmcblk0; do
+	[ -b "$dev" ] || continue
+	if mount -t ext4 "$dev" /mnt/root 2>/dev/null; then
+		echo "   mounted $dev"
+		if [ -x /mnt/root/firstboot.sh ]; then
+			echo "   Debian found - switching root"
+			sleep 2
+			exec switch_root /mnt/root /bin/bash /firstboot.sh
+		fi
+		echo "   (mounted, but no /firstboot.sh on it)"
+		umount /mnt/root
+	fi
+done
+echo "   nothing bootable yet"
+echo ""
+echo "=== end ==="
+echo "if a card is listed above, the storage problem is solved and the"
+echo "next step is copying Debian onto it from TWRP."
+
+while true; do sleep 60; done

@@ -1,0 +1,50 @@
+# === Локальные папки с устройство-специфичными / большими / непубликуемыми файлами ===
+# Создаются локально скриптами по мере работы, в GitHub не грузим.
+/rootfs/
+/firmware/
+/images/
+/backups/
+/downloads/
+/build/
+/out/
+
+# === Бинарные артефакты бринг-апа (образы, архивы) ===
+*.img
+*.img.gz
+*.img.xz
+*.img.zst
+*.bin
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.zst
+*.zip
+*.7z
+
+# TWRP / Odin специфика
+*.tar.md5
+AP_*.tar*
+BL_*.tar*
+CP_*.tar*
+CSC_*.tar*
+HOME_CSC_*.tar*
+
+# === Ключи / секреты / приватные данные ===
+*.pem
+*.key
+*.p12
+*.jks
+id_rsa*
+*.crt
+.env
+
+# === Логи ===
+*.log
+
+# === Мусор ОС / редакторов ===
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
