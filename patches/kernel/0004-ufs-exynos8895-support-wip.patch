@@ -321,7 +321,7 @@ index f2c2e744e..89465f5b4 100644
  extern const struct samsung_ufs_phy_drvdata exynosautov920_ufs_phy;
  extern const struct samsung_ufs_phy_drvdata fsd_ufs_phy;
 diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
-index 13e6357a8..c87eb803b 100644
+index 13e6357a8..ea59cf7a8 100644
 --- a/drivers/ufs/core/ufshcd.c
 +++ b/drivers/ufs/core/ufshcd.c
 @@ -44,6 +44,24 @@
@@ -349,7 +349,25 @@ index 13e6357a8..c87eb803b 100644
  #define UFSHCD_ENABLE_INTRS	(UTP_TRANSFER_REQ_COMPL |\
  				 UTP_TASK_REQ_COMPL |\
  				 UFSHCD_ERROR_MASK)
-@@ -4281,9 +4299,9 @@ int ufshcd_dme_set_attr(struct ufs_hba *hba, u32 attr_sel,
+@@ -2555,12 +2573,16 @@ static inline bool ufshcd_ready_for_uic_cmd(struct ufs_hba *hba)
+  * ufshcd_get_upmcrs - Get the power mode change request status
+  * @hba: Pointer to adapter instance
+  *
+- * This function gets the UPMCRS field of HCS register
++ * This function gets the UPMCRS field of HCS register, or asks the host
++ * variant where to look if HCS does not carry it.
+  *
+  * Return: value of UPMCRS field.
+  */
+ static inline u8 ufshcd_get_upmcrs(struct ufs_hba *hba)
+ {
++	if (hba->vops && hba->vops->get_upmcrs)
++		return hba->vops->get_upmcrs(hba);
++
+ 	return (ufshcd_readl(hba, REG_CONTROLLER_STATUS) >> 8) & 0x7;
+ }
+ 
+@@ -4281,9 +4303,9 @@ int ufshcd_dme_set_attr(struct ufs_hba *hba, u32 attr_sel,
  	} while (ret && peer && --retries);
  
  	if (ret)
@@ -361,7 +379,7 @@ index 13e6357a8..c87eb803b 100644
  
  	return ret;
  }
-@@ -4348,9 +4366,9 @@ int ufshcd_dme_get_attr(struct ufs_hba *hba, u32 attr_sel,
+@@ -4348,9 +4370,9 @@ int ufshcd_dme_get_attr(struct ufs_hba *hba, u32 attr_sel,
  	} while (ret && peer && --retries);
  
  	if (ret)
@@ -373,7 +391,7 @@ index 13e6357a8..c87eb803b 100644
  
  	if (mib_val)
  		*mib_val = ret == 0 ? uic_cmd.argument3 : 0;
-@@ -5114,6 +5132,7 @@ static int ufshcd_hba_execute_hce(struct ufs_hba *hba)
+@@ -5114,6 +5136,7 @@ static int ufshcd_hba_execute_hce(struct ufs_hba *hba)
  
  int ufshcd_hba_enable(struct ufs_hba *hba)
  {
@@ -381,7 +399,7 @@ index 13e6357a8..c87eb803b 100644
  	int ret;
  
  	if (hba->quirks & UFSHCI_QUIRK_BROKEN_HCE) {
-@@ -5243,6 +5262,7 @@ static int ufshcd_validate_link_params(struct ufs_hba *hba)
+@@ -5243,6 +5266,7 @@ static int ufshcd_validate_link_params(struct ufs_hba *hba)
   */
  static int ufshcd_link_startup(struct ufs_hba *hba)
  {
@@ -389,7 +407,7 @@ index 13e6357a8..c87eb803b 100644
  	int ret;
  	int retries = DME_LINKSTARTUP_RETRIES;
  	bool link_startup_again = false;
-@@ -9402,6 +9422,7 @@ static int ufshcd_device_init(struct ufs_hba *hba, bool init_dev_params)
+@@ -9402,6 +9426,7 @@ static int ufshcd_device_init(struct ufs_hba *hba, bool init_dev_params)
   */
  static int ufshcd_probe_hba(struct ufs_hba *hba, bool init_dev_params)
  {
@@ -397,7 +415,7 @@ index 13e6357a8..c87eb803b 100644
  	int ret;
  
  	if (!hba->pm_op_in_progress &&
-@@ -11058,6 +11079,7 @@ static int ufshcd_add_scsi_host(struct ufs_hba *hba)
+@@ -11058,6 +11083,7 @@ static int ufshcd_add_scsi_host(struct ufs_hba *hba)
   */
  int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
  {
@@ -405,7 +423,7 @@ index 13e6357a8..c87eb803b 100644
  	int err;
  	struct Scsi_Host *host = hba->host;
  	struct device *dev = hba->dev;
-@@ -11111,10 +11133,12 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
+@@ -11111,10 +11137,12 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
  	 */
  	hba->vcc_off_delay_us = 2000;
  
@@ -419,7 +437,7 @@ index 13e6357a8..c87eb803b 100644
  	err = ufshcd_hba_capabilities(hba);
  	if (err)
 diff --git a/drivers/ufs/host/ufs-exynos.c b/drivers/ufs/host/ufs-exynos.c
-index b2f65c465..22492be9e 100644
+index b2f65c465..f3415b0a1 100644
 --- a/drivers/ufs/host/ufs-exynos.c
 +++ b/drivers/ufs/host/ufs-exynos.c
 @@ -28,6 +28,24 @@
@@ -465,7 +483,21 @@ index b2f65c465..22492be9e 100644
  
  /* Device fatal error */
  #define DFES_ERR_EN		BIT(31)
-@@ -848,17 +875,26 @@ static void exynos_ufs_config_smu(struct exynos_ufs *ufs)
+@@ -164,6 +191,13 @@ enum {
+ #define UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER0	0x78B8
+ #define UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER1	0x78BC
+ #define UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER2	0x78C0
++/*
++ * Результат смены режима питания. У Exynos8895 поле UPMCRS в стандартном
++ * HCS не реализовано и всегда читается нулём, а настоящий статус лежит
++ * здесь — так же поступает даунстрим (UNIP_DME_PWR_IND_RESULT, quirk
++ * UFSHCD_QUIRK_GET_UPMCRS_DIRECT, включаемый ровно для hw_rev 0004).
++ */
++#define UNIPRO_DME_POWERMODE_IND_RESULT		0x78EC
+ 
+ /*
+  * UFS Protector registers
+@@ -848,17 +882,48 @@ static void exynos_ufs_config_smu(struct exynos_ufs *ufs)
  	if (ufs->opts & EXYNOS_UFS_OPT_UFSPR_SECURE)
  		return;
  
@@ -489,10 +521,49 @@ index b2f65c465..22492be9e 100644
  
  	exynos_ufs_auto_ctrl_hcc_restore(ufs, &val);
 +	UFSMARK("S9 config_smu ЗАВЕРШЁН");
++}
++
++/*
++ * Статус смены режима питания.
++ *
++ * Обычно это поле HCS[10:8], но у Exynos8895 его в HCS нет — оно читается
++ * нулём (PWR_OK) даже после успешной смены режима, и ufshcd_uic_pwr_ctrl()
++ * объявляет ошибку, хотя прерывание о завершении пришло и операция прошла.
++ * Настоящий результат лежит в отдельном регистре UniPro. Даунстрим решает
++ * это ровно так же (UFSHCD_QUIRK_GET_UPMCRS_DIRECT для hw_rev 0004).
++ *
++ * Для всех прочих Exynos поведение не меняется: без флага возвращается то
++ * же самое значение из HCS, что читал бы общий код.
++ */
++static u8 exynos_ufs_get_upmcrs(struct ufs_hba *hba)
++{
++	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
++
++	if (ufs->opts & EXYNOS_UFS_OPT_UPMCRS_IN_UNIPRO)
++		return unipro_readl(ufs, UNIPRO_DME_POWERMODE_IND_RESULT) & 0x7;
++
++	return (ufshcd_readl(hba, REG_CONTROLLER_STATUS) >> 8) & 0x7;
  }
  
  static void exynos_ufs_config_sync_pattern_mask(struct exynos_ufs *ufs,
-@@ -1026,6 +1062,7 @@ static void exynos_ufs_specify_nexus_t_tm_req(struct ufs_hba *hba,
+@@ -883,6 +948,16 @@ static void exynos_ufs_config_sync_pattern_mask(struct exynos_ufs *ufs,
+ 	else
+ 		return;
+ 
++	/*
++	 * Пишется через PA_DBG_OV_TM — вендорский доступ к тестовым
++	 * атрибутам M-PHY у Exynos7420. У SoC новее его нет, UniPro отвечает
++	 * на 0x9540 кодом INVALID_MIB_ATTRIBUTE, и все записи за ним
++	 * отвергаются. Тот же флаг уже отключает config_phy_time_attr() и
++	 * config_phy_cap_attr(), которые построены вокруг того же гейта.
++	 */
++	if (ufs->opts & EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR)
++		return;
++
+ 	mask = exynos_ufs_calc_time_cntr(ufs, sync_len);
+ 	mask = (mask >> 8) & 0xff;
+ 
+@@ -1026,6 +1101,7 @@ static void exynos_ufs_specify_nexus_t_tm_req(struct ufs_hba *hba,
  
  static int exynos_ufs_phy_init(struct exynos_ufs *ufs)
  {
@@ -500,7 +571,7 @@ index b2f65c465..22492be9e 100644
  	struct ufs_hba *hba = ufs->hba;
  	struct phy *generic_phy = ufs->phy;
  	int ret = 0;
-@@ -1131,6 +1168,7 @@ static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
+@@ -1131,6 +1207,7 @@ static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
  
  static int exynos_ufs_pre_link(struct ufs_hba *hba)
  {
@@ -508,7 +579,7 @@ index b2f65c465..22492be9e 100644
  	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
  
  	/* hci */
-@@ -1174,6 +1212,7 @@ static void exynos_ufs_fit_aggr_timeout(struct exynos_ufs *ufs)
+@@ -1174,6 +1251,7 @@ static void exynos_ufs_fit_aggr_timeout(struct exynos_ufs *ufs)
  
  static int exynos_ufs_post_link(struct ufs_hba *hba)
  {
@@ -516,7 +587,7 @@ index b2f65c465..22492be9e 100644
  	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
  	struct phy *generic_phy = ufs->phy;
  	struct exynos_ufs_uic_attr *attr = ufs->drv_data->uic_attr;
-@@ -1282,6 +1321,20 @@ static int exynos_ufs_parse_dt(struct device *dev, struct exynos_ufs *ufs)
+@@ -1282,6 +1360,20 @@ static int exynos_ufs_parse_dt(struct device *dev, struct exynos_ufs *ufs)
  	ufs->pclk_avail_min = PCLK_AVAIL_MIN;
  	ufs->pclk_avail_max = PCLK_AVAIL_MAX;
  
@@ -537,7 +608,7 @@ index b2f65c465..22492be9e 100644
  	attr->rx_adv_fine_gran_sup_en = RX_ADV_FINE_GRAN_SUP_EN;
  	attr->rx_adv_fine_gran_step = RX_ADV_FINE_GRAN_STEP_VAL;
  	attr->rx_adv_min_actv_time_cap = RX_ADV_MIN_ACTV_TIME_CAP;
-@@ -1532,6 +1585,7 @@ static void exynos_ufs_fmp_resume(struct ufs_hba *hba)
+@@ -1532,6 +1624,7 @@ static void exynos_ufs_fmp_resume(struct ufs_hba *hba)
  
  static int exynos_ufs_init(struct ufs_hba *hba)
  {
@@ -545,7 +616,7 @@ index b2f65c465..22492be9e 100644
  	struct device *dev = hba->dev;
  	struct platform_device *pdev = to_platform_device(dev);
  	struct exynos_ufs *ufs;
-@@ -1548,6 +1602,8 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+@@ -1548,6 +1641,8 @@ static int exynos_ufs_init(struct ufs_hba *hba)
  		return PTR_ERR(ufs->reg_hci);
  	}
  
@@ -554,7 +625,7 @@ index b2f65c465..22492be9e 100644
  	/* unipro */
  	ufs->reg_unipro = devm_platform_ioremap_resource_byname(pdev, "unipro");
  	if (IS_ERR(ufs->reg_unipro)) {
-@@ -1555,6 +1611,8 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+@@ -1555,6 +1650,8 @@ static int exynos_ufs_init(struct ufs_hba *hba)
  		return PTR_ERR(ufs->reg_unipro);
  	}
  
@@ -563,7 +634,7 @@ index b2f65c465..22492be9e 100644
  	/* ufs protector */
  	ufs->reg_ufsp = devm_platform_ioremap_resource_byname(pdev, "ufsp");
  	if (IS_ERR(ufs->reg_ufsp)) {
-@@ -1562,12 +1620,14 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+@@ -1562,12 +1659,14 @@ static int exynos_ufs_init(struct ufs_hba *hba)
  		return PTR_ERR(ufs->reg_ufsp);
  	}
  
@@ -578,7 +649,7 @@ index b2f65c465..22492be9e 100644
  	ufs->phy = devm_phy_get(dev, "ufs-phy");
  	if (IS_ERR(ufs->phy)) {
  		ret = PTR_ERR(ufs->phy);
-@@ -1575,8 +1635,10 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+@@ -1575,8 +1674,10 @@ static int exynos_ufs_init(struct ufs_hba *hba)
  		goto out;
  	}
  
@@ -589,7 +660,7 @@ index b2f65c465..22492be9e 100644
  	exynos_ufs_fmp_init(hba, ufs);
  
  	if (ufs->drv_data->drv_init) {
-@@ -1587,13 +1649,17 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+@@ -1587,13 +1688,17 @@ static int exynos_ufs_init(struct ufs_hba *hba)
  		}
  	}
  
@@ -607,7 +678,7 @@ index b2f65c465..22492be9e 100644
  	hba->host->dma_alignment = DATA_UNIT_SIZE - 1;
  	return 0;
  
-@@ -1701,6 +1767,7 @@ static void exynos_ufs_post_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
+@@ -1701,6 +1806,7 @@ static void exynos_ufs_post_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
  static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
  					enum ufs_notify_change_status status)
  {
@@ -615,7 +686,7 @@ index b2f65c465..22492be9e 100644
  	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
  	int ret = 0;
  
-@@ -1742,6 +1809,7 @@ static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
+@@ -1742,6 +1848,7 @@ static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
  static int exynos_ufs_link_startup_notify(struct ufs_hba *hba,
  					  enum ufs_notify_change_status status)
  {
@@ -623,7 +694,15 @@ index b2f65c465..22492be9e 100644
  	int ret = 0;
  
  	switch (status) {
-@@ -2126,6 +2194,7 @@ static struct ufs_hba_variant_ops ufs_hba_exynosauto_vh_ops = {
+@@ -2106,6 +2213,7 @@ static const struct ufs_hba_variant_ops ufs_hba_exynos_ops = {
+ 	.init				= exynos_ufs_init,
+ 	.exit				= exynos_ufs_exit,
+ 	.hce_enable_notify		= exynos_ufs_hce_enable_notify,
++	.get_upmcrs			= exynos_ufs_get_upmcrs,
+ 	.link_startup_notify		= exynos_ufs_link_startup_notify,
+ 	.negotiate_pwr_mode		= exynos_ufs_negotiate_pwr_mode,
+ 	.pwr_change_notify		= exynos_ufs_pwr_change_notify,
+@@ -2126,6 +2234,7 @@ static struct ufs_hba_variant_ops ufs_hba_exynosauto_vh_ops = {
  
  static int exynos_ufs_probe(struct platform_device *pdev)
  {
@@ -631,7 +710,7 @@ index b2f65c465..22492be9e 100644
  	int err;
  	struct device *dev = &pdev->dev;
  	const struct ufs_hba_variant_ops *vops = &ufs_hba_exynos_ops;
-@@ -2258,6 +2327,233 @@ static struct exynos_ufs_uic_attr fsd_uic_attr = {
+@@ -2258,6 +2367,234 @@ static struct exynos_ufs_uic_attr fsd_uic_attr = {
  	.pa_dbg_opt_suite1_off		= PA_DBG_OPTION_SUITE,
  };
  
@@ -856,6 +935,7 @@ index b2f65c465..22492be9e 100644
 +				  EXYNOS_UFS_OPT_SKIP_CONNECTION_ESTAB |
 +				  EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR |
 +				  EXYNOS_UFS_OPT_TIMER_TICK_SELECT |
++				  EXYNOS_UFS_OPT_UPMCRS_IN_UNIPRO |
 +				  EXYNOS_UFS_OPT_UFSPR_SECURE,
 +	.pre_link		= exynos8895_ufs_pre_link,
 +	.post_link		= exynos8895_ufs_post_link,
@@ -865,7 +945,7 @@ index b2f65c465..22492be9e 100644
  static const struct exynos_ufs_drv_data fsd_ufs_drvs = {
  	.uic_attr               = &fsd_uic_attr,
  	.quirks                 = UFSHCD_QUIRK_PRDT_BYTE_GRAN |
-@@ -2314,6 +2610,8 @@ static const struct of_device_id exynos_ufs_of_match[] = {
+@@ -2314,6 +2651,8 @@ static const struct of_device_id exynos_ufs_of_match[] = {
  	  .data	      = &gs101_ufs_drvs },
  	{ .compatible = "samsung,exynos7-ufs",
  	  .data	      = &exynos_ufs_drvs },
@@ -874,6 +954,18 @@ index b2f65c465..22492be9e 100644
  	{ .compatible = "samsung,exynosautov9-ufs",
  	  .data	      = &exynosauto_ufs_drvs },
  	{ .compatible = "samsung,exynosautov9-ufs-vh",
+diff --git a/drivers/ufs/host/ufs-exynos.h b/drivers/ufs/host/ufs-exynos.h
+index abe7e4727..8305aee15 100644
+--- a/drivers/ufs/host/ufs-exynos.h
++++ b/drivers/ufs/host/ufs-exynos.h
+@@ -245,6 +245,7 @@ struct exynos_ufs {
+ #define EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR	BIT(5)
+ #define EXYNOS_UFS_OPT_UFSPR_SECURE		BIT(6)
+ #define EXYNOS_UFS_OPT_TIMER_TICK_SELECT	BIT(7)
++#define EXYNOS_UFS_OPT_UPMCRS_IN_UNIPRO		BIT(8)
+ };
+ 
+ #define for_each_ufs_rx_lane(ufs, i) \
 diff --git a/drivers/ufs/host/ufshcd-pltfrm.c b/drivers/ufs/host/ufshcd-pltfrm.c
 index c2dafb583..fa1a67681 100644
 --- a/drivers/ufs/host/ufshcd-pltfrm.c
@@ -957,3 +1049,21 @@ index c2dafb583..fa1a67681 100644
  	err = ufshcd_init(hba, mmio_base, irq);
  	if (err) {
  		dev_err_probe(dev, err, "Initialization failed with error %d\n",
+diff --git a/include/ufs/ufshcd.h b/include/ufs/ufshcd.h
+index 248d0a5be..7982846a9 100644
+--- a/include/ufs/ufshcd.h
++++ b/include/ufs/ufshcd.h
+@@ -450,6 +450,13 @@ struct ufs_hba_variant_ops {
+ 					enum ufs_notify_change_status);
+ 	int     (*resume)(struct ufs_hba *, enum ufs_pm_op);
+ 	void	(*dbg_register_dump)(struct ufs_hba *hba);
++	/*
++	 * Прочитать статус смены режима питания (UPMCRS) не из HCS, а
++	 * откуда-то ещё. Нужно там, где поле HCS[10:8] не реализовано и
++	 * всегда читается нулём — так у Exynos8895, где результат лежит в
++	 * отдельном регистре блока UniPro.
++	 */
++	u8	(*get_upmcrs)(struct ufs_hba *hba);
+ 	int	(*phy_initialization)(struct ufs_hba *);
+ 	int	(*device_reset)(struct ufs_hba *hba);
+ 	void	(*config_scaling_param)(struct ufs_hba *hba,
