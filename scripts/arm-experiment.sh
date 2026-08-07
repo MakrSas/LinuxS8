@@ -13,11 +13,13 @@ EXP="${1:?укажите файл эксперимента}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ADB="$ROOT/build/tools/platform-tools/adb"
-SD=/external_sd
+# Корень Debian теперь на внутренней памяти (sda29, бывший USERDATA).
+# Карта больше не нужна: см. docs/ufs-bringup.md.
+ROOT_MNT=/mnt/linuxroot
 
-"$ADB" shell "mountpoint -q $SD || mount /dev/block/mmcblk0p1 $SD" >/dev/null 2>&1 || true
-"$ADB" push "$EXP" "$SD/root/lab/experiment.sh" >/dev/null
-"$ADB" shell "chmod 755 $SD/root/lab/experiment.sh; touch $SD/root/lab/ARMED; sync"
+"$ADB" shell "mkdir -p $ROOT_MNT; mountpoint -q $ROOT_MNT || mount -t ext4 /dev/block/sda29 $ROOT_MNT" >/dev/null 2>&1 || true
+"$ADB" push "$EXP" "$ROOT_MNT/root/lab/experiment.sh" >/dev/null
+"$ADB" shell "chmod 755 $ROOT_MNT/root/lab/experiment.sh; touch $ROOT_MNT/root/lab/ARMED; sync"
 
 echo "взведено: $(basename "$EXP")"
 echo "теперь:   $ADB reboot"
