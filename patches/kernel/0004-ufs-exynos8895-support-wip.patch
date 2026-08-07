@@ -107,7 +107,7 @@ index ee665f26c..8779c389e 100644
  	if (IS_ERR(phy_provider)) {
  		err = PTR_ERR(phy_provider);
 diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
-index 13e6357a8..be2fb3957 100644
+index 13e6357a8..c87eb803b 100644
 --- a/drivers/ufs/core/ufshcd.c
 +++ b/drivers/ufs/core/ufshcd.c
 @@ -44,6 +44,24 @@
@@ -135,6 +135,30 @@ index 13e6357a8..be2fb3957 100644
  #define UFSHCD_ENABLE_INTRS	(UTP_TRANSFER_REQ_COMPL |\
  				 UTP_TASK_REQ_COMPL |\
  				 UFSHCD_ERROR_MASK)
+@@ -4281,9 +4299,9 @@ int ufshcd_dme_set_attr(struct ufs_hba *hba, u32 attr_sel,
+ 	} while (ret && peer && --retries);
+ 
+ 	if (ret)
+-		dev_err(hba->dev, "%s: attr-id 0x%x val 0x%x failed %d retries\n",
++		dev_err(hba->dev, "%s: attr-id 0x%x val 0x%x failed %d retries (ret=%d)\n",
+ 			set, UIC_GET_ATTR_ID(attr_sel), mib_val,
+-			UFS_UIC_COMMAND_RETRIES - retries);
++			UFS_UIC_COMMAND_RETRIES - retries, ret);
+ 
+ 	return ret;
+ }
+@@ -4348,9 +4366,9 @@ int ufshcd_dme_get_attr(struct ufs_hba *hba, u32 attr_sel,
+ 	} while (ret && peer && --retries);
+ 
+ 	if (ret)
+-		dev_err(hba->dev, "%s: attr-id 0x%x failed %d retries\n",
++		dev_err(hba->dev, "%s: attr-id 0x%x failed %d retries (ret=%d)\n",
+ 			get, UIC_GET_ATTR_ID(attr_sel),
+-			UFS_UIC_COMMAND_RETRIES - retries);
++			UFS_UIC_COMMAND_RETRIES - retries, ret);
+ 
+ 	if (mib_val)
+ 		*mib_val = ret == 0 ? uic_cmd.argument3 : 0;
 @@ -5114,6 +5132,7 @@ static int ufshcd_hba_execute_hce(struct ufs_hba *hba)
  
  int ufshcd_hba_enable(struct ufs_hba *hba)
