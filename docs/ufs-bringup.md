@@ -15,7 +15,7 @@
 | Debian 13 + GNOME 48 | **работает**, грузится с microSD (`mmcblk0p1`, метка `userdata`) |
 | Внутренняя память (UFS) | **не работает** — линк UniPro не поднимается |
 | Ядро | mainline 7.2.0-rc6, база `0d8395707`, дерево в `build/src/linux` |
-| Прошито в BOOT (`sda7`) | `build/device-backups/boot_nohooks.img` (md5 `9d4f88af1e33183df876e98669fbed4f`) |
+| Прошито в BOOT (`sda7`) | `build/device-backups/boot_prelink.img` (md5 `b2d69fc523bcb38ab3d18def1358a99e`) |
 | UFS/PHY в ядре | модулями (`=m`), в blacklist, сами не грузятся |
 
 Цепочка загрузки: `S-Boot → uniLoader → mainline → initramfs → switch_root →
@@ -386,3 +386,71 @@ org.gnome.Shell@wayland.service: Failed with result 'timeout'.
 (в `setup-rootfs-session.sh`, пункт 11). Плюс вывод опыта больше не
 дублируется в `/dev/kmsg` — каждая такая строка перерисовывала fbcon
 целиком и отбирала экран у сеанса.
+
+---
+
+## 9. Что скачать для следующего шага и что оттуда взять
+
+Дальше без даунстрим-исходников не обойтись: нужна настоящая таблица
+калибровки PMA для Exynos8895 и подтверждение двух адресов. Всё это есть в
+вендорском ядре Samsung.
+
+### 9.1. Даунстрим-ядро Exynos8895
+
+```bash
+git clone --depth 1 https://github.com/Dyneteve/android_kernel_samsung_universal8895 \
+	build/src/downstream-8895
+```
+
+(Это тот же источник, из которого уже брались адреса регистров UFS — они
+подтвердились независимо через путь `/dev/block/platform/11120000.ufs/...`
+в TWRP, так что источнику можно доверять. Если репозиторий пропадёт, годится
+любой форк `android_kernel_samsung_universal8895`, а также ядра
+`universal8895` от других устройств — dreamlte/dream2lte/greatlte.)
+
+**Что искать внутри:**
+
+| Что нужно | Где обычно лежит у Samsung |
+|---|---|
+| Таблица калибровки PMA (сотни пар «регистр — значение») | `drivers/scsi/ufs/ufs-exynos.c`, `ufs-exynos.h`, либо отдельные `ufs-cal-*.c` / `ufs-cal-if.c` |
+| Смещение регистра изоляции PHY в PMU | `include/soc/samsung/exynos-pmu.h`, `arch/arm64/.../regs-pmu.h`, либо литерал `0x16480724` в dts под узлом `ufs-phy-sys` |
+| Источник и частота `ref_clk` PHY | узел `ufs` в `arch/arm64/boot/dts/exynos/exynos8895*.dts*` |
+| Последовательность старта линка | `exynos_ufs_pre_link()` / `..._post_link()` даунстрима — сверить с нашим `exynos8895_ufs_pre_link()` |
+
+### 9.2. Что именно проверить в первую очередь
+
+1. **Существуют ли у 8895 вообще symbol-клоки PHY.** Ранее проверялось и
+   ответ был «нет, есть только 4 UFS-клока: aclk/fmp/unipro + мультиплексор».
+   Если подтвердится — четырёхтактовая модель `samsung,exynos7-ufs-phy`
+   неверна в принципе, и нужен свой `samsung,exynos8895-ufs-phy` с одним
+   `ref_clk` (как у `autov9`, `autov920`, `gs101`).
+2. **Смещение изоляции.** У нас `0x724`, у драйвера по умолчанию `0x720`.
+   Из userspace PMU не читается (bus error), так что проверять придётся
+   либо по исходникам, либо инструментированием драйвера (прочитать
+   регистр через тот же regmap до и после записи и напечатать).
+3. **Таблица калибровки.** Самая объёмная часть. Переносится в новый файл
+   `drivers/phy/samsung/phy-exynos8895-ufs.c` по образцу
+   `phy-gs101-ufs.c` / `phy-exynos7-ufs.c`.
+
+### 9.3. Что НЕ нужно скачивать
+
+- Ничего для microSD — она работает.
+- Ничего для сборки: тулчейн, uniLoader, busybox, ядро уже в `build/`.
+- Пакеты Debian — rootfs собран, GNOME установлен.
+
+---
+
+## 10. Состояние на момент передачи
+
+| Что | Значение |
+|---|---|
+| Последний коммит | `pre_link принят целиком, линк не встал; GNOME убивал таймаут` |
+| Прошито в `sda7` | `build/device-backups/boot_prelink.img`, md5 `b2d69fc523bcb38ab3d18def1358a99e` |
+| Ядро | `build/src/linux`, база `0d8395707`, изменения продублированы в `patches/kernel/` |
+| Модули на карте | синхронизированы с этой сборкой (`scripts/push-modules.sh`) |
+| Карта | 7.0 ГБ, занято 3.2 ГБ, ФС чистая |
+| Флаг `ARMED` | снят — следующая загрузка пойдёт без опыта |
+| Телефон | в TWRP |
+
+Откат, если что-то пойдёт не так: `build/device-backups/boot_orig.img` —
+родной раздел BOOT, снятый до первой перепрошивки.
