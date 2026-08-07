@@ -15,7 +15,7 @@
 | Debian 13 + GNOME 48 | **работает**, грузится с microSD (`mmcblk0p1`, метка `userdata`) |
 | Внутренняя память (UFS) | **не работает** — линк UniPro не поднимается |
 | Ядро | mainline 7.2.0-rc6, база `0d8395707`, дерево в `build/src/linux` |
-| Прошито в BOOT (`sda7`) | `build/device-backups/boot_freqtable.img` |
+| Прошито в BOOT (`sda7`) | `build/device-backups/boot_nohooks.img` (md5 `9d4f88af1e33183df876e98669fbed4f`) |
 | UFS/PHY в ядре | модулями (`=m`), в blacklist, сами не грузятся |
 
 Цепочка загрузки: `S-Boot → uniLoader → mainline → initramfs → switch_root →
@@ -289,3 +289,41 @@ dme-set: attr-id 0x9540 val 0x1 failed 0 retries (ret=1)
 Смещения `VND_*` у gs101 общие для нового поколения M-PHY Samsung — есть
 шанс, что подойдут и здесь; сверять с даунстримом
 `Dyneteve/android_kernel_samsung_universal8895`.
+
+### Результат: шум ушёл, осталась одна чистая ошибка
+
+После отключения вендорских атрибутов 7420 **все `INVALID_MIB_ATTRIBUTE`
+исчезли из лога полностью.** Осталась ровно одна строка:
+
+```
+UFSTRACE: pre_link enter -> exynos_ufs_phy_init -> phy_init -> power_on -> calibrate
+exynos-ufshc 11120000.ufs: uic cmd 0x16 with arg3 0x0 completion timeout
+exynos-ufshc 11120000.ufs: link startup failed -110
+```
+
+Это важный сдвиг качества: раньше отказы сыпались пачками и маскировали
+происходящее, теперь отказ ровно один и он говорит конкретную вещь.
+
+`0x16` = `DME_LINK_STARTUP`. Он **не отвергается** (кода отказа нет) — он
+**не завершается**: команда выдана, прерывание о завершении не приходит.
+Это уже не «неправильный атрибут», а «M-PHY не устанавливает связь с
+устройством». Вот теперь подозрение на PHY законно.
+
+Отметим: `exynos_ufs_pre_link()` (общая функция драйвера, не хук) всё равно
+выполняется — она делает `exynos_ufs_config_unipro()` и
+`exynos_ufs_phy_init()`. Наш `drv_data->pre_link` теперь пуст, но эта часть
+никуда не делась и тоже посчитана от `mclk_rate`.
+
+### Приоритет работ после этого прогона
+
+1. **`exynos8895_ufs_pre_link()` по образцу `gs101_ufs_pre_link()`** —
+   гейт `0x200` вместо `PA_DBG_OV_TM`, программирование `VND_TX_CLK_PRD` /
+   `VND_RX_CLK_PRD` (= `DIV_ROUND_UP(NSEC_PER_SEC, mclk_rate)`), значения
+   line-reset, затем стандартные атрибуты линка. Скорее всего именно этого
+   сейчас и не хватает: мы убрали настройку 7420, но ничего не поставили
+   взамен.
+2. **Проверить `exynos_ufs_config_unipro()`** — что она пишет в регистры
+   UniPro и подходят ли эти смещения 8895.
+3. **PHY-калибровка под 8895** — только если пункты 1–2 не помогут.
+4. Отдельно: путь очистки после ошибки неисправен (`insmod` уходит в
+   SIGSEGV, стек через `ufshcd_setup_clocks+0xfc → ufshcd_hba_exit`).
