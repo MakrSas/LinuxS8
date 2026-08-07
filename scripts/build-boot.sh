@@ -28,7 +28,11 @@ OUT="$BUILD/device-backups/boot_${NAME}.img"
 
 if [ "$REBUILD_KERNEL" = "--kernel" ]; then
 	echo ">> ядро"
-	make -C "$LINUX" -j"$(nproc)" Image dtbs
+	# modules обязательно вместе с Image: UFS и PHY собраны модулями, и
+	# "make Image dtbs" их не трогает. На этом уже обожглись — разложили
+	# на телефон .ko четырёхчасовой давности и полдня читали с экрана
+	# трассировку, которой в них не было.
+	make -C "$LINUX" -j"$(nproc)" Image dtbs modules
 	cp "$LINUX/arch/arm64/boot/Image" "$UNILOADER/blob/Image"
 	cp "$LINUX/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dtb" "$UNILOADER/blob/dtb"
 fi
