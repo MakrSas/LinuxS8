@@ -205,7 +205,7 @@ index 13e6357a8..c87eb803b 100644
  	err = ufshcd_hba_capabilities(hba);
  	if (err)
 diff --git a/drivers/ufs/host/ufs-exynos.c b/drivers/ufs/host/ufs-exynos.c
-index b2f65c465..142b9674a 100644
+index b2f65c465..8af2f1789 100644
 --- a/drivers/ufs/host/ufs-exynos.c
 +++ b/drivers/ufs/host/ufs-exynos.c
 @@ -28,6 +28,24 @@
@@ -378,7 +378,7 @@ index b2f65c465..142b9674a 100644
  	int err;
  	struct device *dev = &pdev->dev;
  	const struct ufs_hba_variant_ops *vops = &ufs_hba_exynos_ops;
-@@ -2258,6 +2304,63 @@ static struct exynos_ufs_uic_attr fsd_uic_attr = {
+@@ -2258,6 +2304,136 @@ static struct exynos_ufs_uic_attr fsd_uic_attr = {
  	.pa_dbg_opt_suite1_off		= PA_DBG_OPTION_SUITE,
  };
  
@@ -400,6 +400,78 @@ index b2f65c465..142b9674a 100644
 + * exynos_ufs_config_smu() не трогает UFSP вообще, а FMP инициализируется
 + * через SMC, как это уже сделано для gs101.
 + */
++/*
++ * Своя настройка линка для Exynos8895.
++ *
++ * Почему не подошла exynos7_ufs_pre_link: она вся построена вокруг
++ * PA_DBG_OV_TM (0x9540) — вендорского «режима отладочного доступа»
++ * Exynos7420. На этом чипе такого атрибута нет, UniPro отвечает на него
++ * кодом 1 (INVALID_MIB_ATTRIBUTE), и следом отвергаются все тестовые
++ * атрибуты M-PHY, которые за ним идут.
++ *
++ * Все SoC Samsung новее 7420 (autov9, autov920, gs101) открывают вендорский
++ * доступ атрибутом 0x200 и программируют период тактов через VND_*.
++ * Отсюда и берём образец — ближайший работающий родственник это gs101.
++ *
++ * Осознанно НЕ переносим из gs101 его точечную подстройку линий
++ * (0x2f/0x84/0x25 на RX, 0x04/0x7F на TX) и ручную установку соединения
++ * (N_DEVICEID, T_CONNECTIONSTATE): это значения под конкретный чип, а у нас
++ * выставлен EXYNOS_UFS_OPT_SKIP_CONNECTION_ESTAB. Начинаем с того, без чего
++ * M-PHY заведомо не поедет — период тактов и длительность line reset, оба
++ * считаются от реальной mclk_rate.
++ */
++static int exynos8895_ufs_pre_link(struct exynos_ufs *ufs)
++{
++	struct ufs_hba *hba = ufs->hba;
++	u32 tx_line_reset_period, rx_line_reset_period;
++	int i;
++
++	UFSMARK("8895 pre_link: mclk=%lu", ufs->mclk_rate);
++
++	rx_line_reset_period = (RX_LINE_RESET_TIME * ufs->mclk_rate) /
++			       NSEC_PER_MSEC;
++	tx_line_reset_period = (TX_LINE_RESET_TIME * ufs->mclk_rate) /
++			       NSEC_PER_MSEC;
++
++	unipro_writel(ufs, get_mclk_period_unipro_18(ufs), COMP_CLK_PERIOD);
++
++	/* открыть доступ к вендорским атрибутам M-PHY */
++	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x40);
++
++	for_each_ufs_rx_lane(ufs, i) {
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_CLK_PRD, i),
++			       DIV_ROUND_UP(NSEC_PER_SEC, ufs->mclk_rate));
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_CLK_PRD_EN, i), 0x0);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_LINERESET_VALUE2, i),
++			       (rx_line_reset_period >> 16) & 0xFF);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_LINERESET_VALUE1, i),
++			       (rx_line_reset_period >> 8) & 0xFF);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_LINERESET_VALUE0, i),
++			       (rx_line_reset_period) & 0xFF);
++	}
++
++	for_each_ufs_tx_lane(ufs, i) {
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_TX_CLK_PRD, i),
++			       DIV_ROUND_UP(NSEC_PER_SEC, ufs->mclk_rate));
++		/* чтобы VND_TX_LINERESET_PVALUE не влиял на VND_TX_CLK_PRD */
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_TX_CLK_PRD_EN, i), 0x02);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_TX_LINERESET_PVALUE2, i),
++			       (tx_line_reset_period >> 16) & 0xFF);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_TX_LINERESET_PVALUE1, i),
++			       (tx_line_reset_period >> 8) & 0xFF);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_TX_LINERESET_PVALUE0, i),
++			       (tx_line_reset_period) & 0xFF);
++	}
++
++	/* закрыть вендорский доступ */
++	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x0);
++
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_LOCAL_TX_LCC_ENABLE), 0x0);
++
++	UFSMARK("8895 pre_link готов");
++	return 0;
++}
++
 +static const struct exynos_ufs_drv_data exynos8895_ufs_drvs = {
 +	.uic_attr		= &exynos7_uic_attr,
 +	.quirks			= UFSHCD_QUIRK_PRDT_BYTE_GRAN |
@@ -435,6 +507,7 @@ index b2f65c465..142b9674a 100644
 +	 * UCRDY выставлен, PMA держит осмысленные значения), так что
 +	 * шансы поднять линк на умолчаниях вполне реальные.
 +	 */
++	.pre_link		= exynos8895_ufs_pre_link,
 +	.pre_pwr_change		= exynos7_ufs_pre_pwr_change,
 +	.post_pwr_change	= exynos7_ufs_post_pwr_change,
 +};
@@ -442,7 +515,7 @@ index b2f65c465..142b9674a 100644
  static const struct exynos_ufs_drv_data fsd_ufs_drvs = {
  	.uic_attr               = &fsd_uic_attr,
  	.quirks                 = UFSHCD_QUIRK_PRDT_BYTE_GRAN |
-@@ -2314,6 +2417,8 @@ static const struct of_device_id exynos_ufs_of_match[] = {
+@@ -2314,6 +2490,8 @@ static const struct of_device_id exynos_ufs_of_match[] = {
  	  .data	      = &gs101_ufs_drvs },
  	{ .compatible = "samsung,exynos7-ufs",
  	  .data	      = &exynos_ufs_drvs },
