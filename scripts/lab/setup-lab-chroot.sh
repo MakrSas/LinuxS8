@@ -21,6 +21,23 @@ else
 	sed -i '/^\[Journal\]/a SyncIntervalSec=1s' /etc/systemd/journald.conf
 fi
 
+# --- запретить udev грузить UFS самому ---------------------------------
+# Как только модули легли в /lib/modules, udev увидел OF-modalias
+# (of:N*T*Csamsung,exynos7-ufs) у включённых в dts узлов и загрузил их сам,
+# на 11-й секунде загрузки — раньше, чем успел стартовать наш эксперимент.
+# Телефон замёрз, а опыт даже не начался.
+#
+# Дальше UFS грузим только руками и только через insmod: modprobe honours
+# эти строки, insmod — нет, поэтому эксперименту они не мешают.
+cat > /etc/modprobe.d/dreamlte-ufs.conf <<'EOF'
+# UFS на этом устройстве пока намертво вешает систему — грузить только
+# осознанно, из эксперимента, через insmod с явным путём.
+blacklist ufs_exynos
+blacklist phy_exynos_ufs
+install ufs_exynos /bin/true
+install phy_exynos_ufs /bin/true
+EOF
+
 # --- юниты -------------------------------------------------------------
 chmod 755 /root/lab/lab-runner.sh /root/lab/dreamlte-heartbeat.sh
 mkdir -p /var/log/dreamlte
