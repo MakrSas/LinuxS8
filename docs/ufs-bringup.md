@@ -63,16 +63,31 @@ systemd → GDM → GNOME`. Ядро S-Boot читает с внутренней
   ровно для `hw_rev 0004`. У нас это хук `vops->get_upmcrs` и флаг
   `EXYNOS_UFS_OPT_UPMCRS_IN_UNIPRO`.
 
-### 1.2. Что дальше
+### 1.2. Переезд состоялся
 
-1. Перенести Debian с microSD на `sda29` (USERDATA, 34.5 ГБ, уже ext4).
-2. Убрать UFS/PHY из blacklist и собрать их в ядро (`=y`) либо оставить
-   модулями, но класть в initramfs — корень будет на UFS, модуль с корня
-   не загрузить.
-3. Починить путь очистки после ошибки: `exynos_ufs_ctrl_clkstop` падает по
+Debian перенесён на `sda29` и **грузится без карты вообще**. Подробности —
+в [progress-log.md](progress-log.md), запись от 2026-08-08. Коротко:
+
+- корень `sda29`, метка **`linuxroot`** (не `userdata`: у microSD метка
+  ровно та же, и `LABEL=userdata` в fstab указывал бы на две разные ФС);
+- `CONFIG_SCSI_UFS_EXYNOS=y`, `CONFIG_PHY_SAMSUNG_UFS=y`, blacklist снят;
+- initramfs ищет корень в порядке `sda29`, `mmcblk0p1`, `mmcblk0`;
+- скрипты обвязки монтируют `sda29` в `/mnt/linuxroot`, а не карту;
+- **`tar` из TWRP на копировании rootfs не годится** — busybox 1.22.1
+  разрастается до 3 ГБ и его убивает OOM-killer всегда на 348 МБ. Только
+  `cp -a`.
+
+### 1.3. Что осталось по UFS
+
+1. Снять отладочные `UFSMARK`: со встроенным драйвером они срабатывают на
+   каждой загрузке, и каждый стоит `mdelay(60)` плюс перерисовку fbcon.
+2. Починить путь очистки после ошибки: `exynos_ufs_ctrl_clkstop` падает по
    синхронному внешнему аборту в `ufshcd_hba_exit`. Пока probe успешен, это
    не мешает, но дефект настоящий.
-4. Снять отладочные `UFSMARK` и подготовить правки к отправке в апстрим.
+3. Подготовить правки к отправке в апстрим. Кандидаты, годные как есть:
+   `phy-exynos8895-ufs.c` + `samsung,exynos8895-ufs-phy`,
+   `exynos8895_ufs_drvs` с его хуками, чтение `pclk-freq-avail-range`,
+   хук `vops->get_upmcrs`.
 
 ---
 
