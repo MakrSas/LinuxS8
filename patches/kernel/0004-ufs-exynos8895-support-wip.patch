@@ -205,7 +205,7 @@ index 13e6357a8..c87eb803b 100644
  	err = ufshcd_hba_capabilities(hba);
  	if (err)
 diff --git a/drivers/ufs/host/ufs-exynos.c b/drivers/ufs/host/ufs-exynos.c
-index b2f65c465..f418b6d6c 100644
+index b2f65c465..142b9674a 100644
 --- a/drivers/ufs/host/ufs-exynos.c
 +++ b/drivers/ufs/host/ufs-exynos.c
 @@ -28,6 +28,24 @@
@@ -378,7 +378,7 @@ index b2f65c465..f418b6d6c 100644
  	int err;
  	struct device *dev = &pdev->dev;
  	const struct ufs_hba_variant_ops *vops = &ufs_hba_exynos_ops;
-@@ -2258,6 +2304,45 @@ static struct exynos_ufs_uic_attr fsd_uic_attr = {
+@@ -2258,6 +2304,63 @@ static struct exynos_ufs_uic_attr fsd_uic_attr = {
  	.pa_dbg_opt_suite1_off		= PA_DBG_OPTION_SUITE,
  };
  
@@ -414,9 +414,27 @@ index b2f65c465..f418b6d6c 100644
 +				  EXYNOS_UFS_OPT_BROKEN_RX_SEL_IDX |
 +				  EXYNOS_UFS_OPT_SKIP_CONNECTION_ESTAB |
 +				  EXYNOS_UFS_OPT_USE_SW_HIBERN8_TIMER |
++				  EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR |
 +				  EXYNOS_UFS_OPT_UFSPR_SECURE,
-+	.pre_link		= exynos7_ufs_pre_link,
-+	.post_link		= exynos7_ufs_post_link,
++	/*
++	 * Ни pre_link, ни post_link от exynos7 здесь не годятся, и это
++	 * измерено, а не предположено. Все их записи отвергаются UniPro с
++	 * кодом 1 (INVALID_MIB_ATTRIBUTE):
++	 *
++	 *   dme-set: attr-id 0x9540 val 0x1 failed 0 retries (ret=1)
++	 *
++	 * 0x9540 — это PA_DBG_OV_TM, вендорский «режим отладочного
++	 * доступа» Exynos7420. Им exynos_ufs_enable_ov_tm() открывает
++	 * доступ к тестовым атрибутам M-PHY, и раз его нет, следом
++	 * отвергаются и все они (0x316, 0x317, 0x340, 0x341, 0x352..0x355).
++	 * У Exynos8895 схема другая: SoC новее 7420 открывают вендорский
++	 * доступ через атрибут 0x200 (см. gs101_ufs_pre_link).
++	 *
++	 * Пока не написан свой pre_link, хуки не ставим вовсе. Это не
++	 * поражение: S-Boot оставляет PHY уже настроенным (HCS = 0xf,
++	 * UCRDY выставлен, PMA держит осмысленные значения), так что
++	 * шансы поднять линк на умолчаниях вполне реальные.
++	 */
 +	.pre_pwr_change		= exynos7_ufs_pre_pwr_change,
 +	.post_pwr_change	= exynos7_ufs_post_pwr_change,
 +};
@@ -424,7 +442,7 @@ index b2f65c465..f418b6d6c 100644
  static const struct exynos_ufs_drv_data fsd_ufs_drvs = {
  	.uic_attr               = &fsd_uic_attr,
  	.quirks                 = UFSHCD_QUIRK_PRDT_BYTE_GRAN |
-@@ -2314,6 +2399,8 @@ static const struct of_device_id exynos_ufs_of_match[] = {
+@@ -2314,6 +2417,8 @@ static const struct of_device_id exynos_ufs_of_match[] = {
  	  .data	      = &gs101_ufs_drvs },
  	{ .compatible = "samsung,exynos7-ufs",
  	  .data	      = &exynos_ufs_drvs },
