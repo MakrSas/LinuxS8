@@ -1679,3 +1679,71 @@ DVFS через PLL_G3D остаётся отдельной задачей: се
 Прошито `boot_gpu3.img`, md5 `c210c52246bd1ec77f862835ba51cebb`, взведён
 опыт 11. Он дампит и `0x120`, и `0x140`/`0x148`, чтобы стало видно, какой
 из адресов настоящий.
+
+### Опыт 11: panfrost поднялся. Mali-G71 MP20 отвечает
+
+```
+panfrost 13900000.gpu: clock rate = 200000000
+panfrost 13900000.gpu: mali-g71 id 0x60a0 major 0x0 minor 0x0 status 0x1
+panfrost 13900000.gpu: features: 00000000,00000577, issues: 00000000,2c000400
+panfrost 13900000.gpu: Features: L2:0x07130206 Shader:0x00000000 Tiler:0x00000809
+                                 Mem:0x301 MMU:0x00002830 AS:0xff JS:0x7
+panfrost 13900000.gpu: shader_present=0x17771777 l2_present=0x1
+[drm] Initialized panfrost 1.6.0 for 13900000.gpu on minor 1
+```
+
+`/sys/class/drm/card1 -> DRIVER=panfrost`, появился `/dev/dri/renderD128`.
+
+`shader_present = 0x17771777` — двадцать единичных битов, то есть **20 ядер
+шейдеров**. Это ровно Mali-G71 **MP20**, как и заявлено у Exynos8895.
+Драйвер сам опознал чип как `mali-g71` и подобрал список errata под
+ревизию `status 0x1`.
+
+### Вопрос с адресом PLL закрыт железом
+
+```
+0x13800120 = 0x00000000     <- адрес из cmucal, мёртвый
+0x13800140 = 0x80a00412     <- адрес из pmucal, живой: бит ENABLE выставлен,
+                               MDIV=160 PDIV=4 SDIV=2
+0x13800148 = 0x10000001     <- совпадает со значением, которое pmucal пишет
+                               в PLL_CON2 при выключении домена
+```
+
+Прав был pmucal. Исправление адреса на `0x140` подтвердилось, а заодно
+подтвердилось и то, что мой первоначальный довод (шаг слотов `0x20`) не
+годился как способ выбора: он говорит, где слоты могут быть, но не какой из
+них чей.
+
+### Почему пропал рабочий стол
+
+Ядро тут ни при чём — система грузится, пульс шёл 56 секунд. Валится
+`gnome-shell`:
+
+```
+gnome-shell: Added device '/dev/dri/card0' (simpledrm) using atomic mode setting.
+gnome-shell: libEGL warning: Not allowed to force software rendering when API
+             explicitly selects a hardware device.
+org.gnome.Shell@wayland.service: Main process exited, code=killed, status=11/SEGV
+```
+
+и systemd перезапускает его по кругу — отсюда мигание экрана.
+
+Причина верхнего уровня понятна: у нас в `gdm3.service.d/software-gl.conf`
+жёстко прописаны `LIBGL_ALWAYS_SOFTWARE=1` и `GALLIUM_DRIVER=llvmpipe`.
+Это ставилось, когда никакого GPU в системе не было. Теперь рендер-узел
+появился, EGL отказывается форсировать софтверный путь при живом
+аппаратном устройстве — и что-то в этой развилке падает.
+
+**Чего пока НЕ известно:** падает ли `gnome-shell` из-за самого конфликта
+настроек, или из-за того, что Mesa на G71 действительно не работает. Это
+разные диагнозы, и по текущим данным их не различить. Проверять надо
+инструментом попроще GNOME.
+
+`panfrost_dri.so` в установленной Debian-Mesa на месте, так что userspace
+для проверки есть.
+
+### Состояние
+
+Опасности нет: `panfrost` в blacklist и грузится только из опыта, а флаг
+`ARMED` снят. Следующая загрузка пойдёт без него, и рабочий стол вернётся
+сам — перепрошивать ничего не нужно.
