@@ -206,7 +206,7 @@ index 305dc72f9..4f02a52e3 100644
 +	samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
 +};
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
-index ff114cd6c..467119214 100644
+index ff114cd6c..6609ee142 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 +++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 @@ -1433,6 +1433,18 @@ mmc: mmc@11500000 {
@@ -228,7 +228,7 @@ index ff114cd6c..467119214 100644
  			fifo-depth = <64>;
  			interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH>;
  			#address-cells = <1>;
-@@ -1440,6 +1452,50 @@ mmc: mmc@11500000 {
+@@ -1440,6 +1452,75 @@ mmc: mmc@11500000 {
  			status = "disabled";
  		};
  
@@ -261,7 +261,13 @@ index ff114cd6c..467119214 100644
 +		};
 +
 +		ufs: ufs@11120000 {
-+			compatible = "samsung,exynos7-ufs";
++			/*
++			 * Свой compatible, а не exynos7: у 8895 блок UFSP
++			 * (защита/SMU) принадлежит защищённому миру, и запись
++			 * в него из ядра поднимает SError с паникой. Разница
++			 * описана у exynos8895_ufs_drvs в ufs-exynos.c.
++			 */
++			compatible = "samsung,exynos8895-ufs";
 +			reg = <0x11120000 0x200>,
 +			      <0x11121100 0x200>,
 +			      <0x11110000 0x8000>,
@@ -271,6 +277,25 @@ index ff114cd6c..467119214 100644
 +			clocks = <&cmu_fsys0 CLK_GOUT_FSYS0_UFS_EMBD_I_ACLK>,
 +				 <&cmu_fsys0 CLK_GOUT_FSYS0_UFS_EMBD_I_CLK_UNIPRO>;
 +			clock-names = "core_clk", "sclk_unipro_main";
++			/*
++			 * Без этого свойства ufshcd_parse_clock_info() выходит
++			 * раньше, чем добавит в hba->clk_list_head хоть один
++			 * клок ("freq-table-hz property not specified" в логе).
++			 * Дальше рушится всё: exynos_ufs_get_clk_info() видит
++			 * пустой список, уходит по goto out и возвращает 0 —
++			 * то есть УСПЕХ, оставив pclk_rate и mclk_rate нулями.
++			 *
++			 * На arm64 деление на ноль не ловится, а тихо даёт ноль,
++			 * поэтому UNIPRO_PCLK_PERIOD() = 0, делитель PWM не
++			 * находится ("failed to decide pwm clock divider"), а
++			 * все тайминги M-PHY считаются от нулевой частоты. При
++			 * таких настройках линк UniPro не поднимется никогда.
++			 *
++			 * <0 0> означает "масштабирование частоты не
++			 * используется" — ровно так это записано у exynos7,
++			 * exynosautov9, exynosautov920 и gs101.
++			 */
++			freq-table-hz = <0 0>, <0 0>;
 +			phys = <&ufs_phy>;
 +			phy-names = "ufs-phy";
 +			status = "disabled";

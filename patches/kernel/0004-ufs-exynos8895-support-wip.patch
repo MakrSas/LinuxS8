@@ -1,0 +1,494 @@
+diff --git a/drivers/phy/samsung/phy-samsung-ufs.c b/drivers/phy/samsung/phy-samsung-ufs.c
+index ee665f26c..8779c389e 100644
+--- a/drivers/phy/samsung/phy-samsung-ufs.c
++++ b/drivers/phy/samsung/phy-samsung-ufs.c
+@@ -21,6 +21,24 @@
+ 
+ #include "phy-samsung-ufs.h"
+ 
++/*
++ * Маркер трассировки bring-up'а (временный, в апстрим не идёт).
++ *
++ * Голый pr_emerg тут бесполезен: на dreamlte единственная консоль — fbcon
++ * на 1440x2960 без ускорения, он рисует строку на порядки медленнее, чем
++ * они печатаются, и при зависании на экране остаётся не последняя
++ * выполненная строка, а последняя ОТРИСОВАННАЯ. Мы на этом уже один раз
++ * обманулись: экран показывал остановку в ufshcd_alloc_host(), где нет ни
++ * одного обращения к железу.
++ *
++ * mdelay, а не msleep: busy-wait не отдаёт процессор и работает в любом
++ * контексте, включая атомарный.
++ */
++#define UFSMARK(fmt, ...) do {					\
++	pr_emerg("UFSTRACE: " fmt "\n", ##__VA_ARGS__);	\
++	mdelay(60);						\
++} while (0)
++
+ #define for_each_phy_lane(phy, i) \
+ 	for (i = 0; i < (phy)->lane_cnt; i++)
+ #define for_each_phy_cfg(cfg) \
+@@ -47,6 +65,7 @@ void samsung_ufs_phy_config(struct samsung_ufs_phy *phy,
+ 
+ int samsung_ufs_phy_wait_for_lock_acq(struct phy *phy, u8 lane)
+ {
++	UFSMARK("wait_for_lock_acq enter (SPINS IF PHY DEAD)");
+ 	struct samsung_ufs_phy *ufs_phy = get_samsung_ufs_phy(phy);
+ 	const unsigned int timeout_us = 100000;
+ 	const unsigned int sleep_us = 10;
+@@ -75,6 +94,7 @@ int samsung_ufs_phy_wait_for_lock_acq(struct phy *phy, u8 lane)
+ 
+ static int samsung_ufs_phy_calibrate(struct phy *phy)
+ {
++	UFSMARK("calibrate enter");
+ 	struct samsung_ufs_phy *ufs_phy = get_samsung_ufs_phy(phy);
+ 	const struct samsung_ufs_phy_cfg * const *cfgs = ufs_phy->cfgs;
+ 	const struct samsung_ufs_phy_cfg *cfg;
+@@ -163,6 +183,7 @@ static int samsung_ufs_phy_clks_init(struct samsung_ufs_phy *phy)
+ 
+ static int samsung_ufs_phy_init(struct phy *phy)
+ {
++	UFSMARK("phy_init enter");
+ 	struct samsung_ufs_phy *ss_phy = get_samsung_ufs_phy(phy);
+ 
+ 	ss_phy->lane_cnt = phy->attrs.bus_width;
+@@ -173,6 +194,7 @@ static int samsung_ufs_phy_init(struct phy *phy)
+ 
+ static int samsung_ufs_phy_power_on(struct phy *phy)
+ {
++	UFSMARK("power_on enter");
+ 	struct samsung_ufs_phy *ss_phy = get_samsung_ufs_phy(phy);
+ 	int ret;
+ 
+@@ -288,6 +310,7 @@ static int samsung_ufs_phy_probe(struct platform_device *pdev)
+ 	u32 isol_offset;
+ 	int err = 0;
+ 
++	UFSMARK("probe enter");
+ 	match = of_match_node(samsung_ufs_phy_match, dev->of_node);
+ 	if (!match) {
+ 		err = -EINVAL;
+@@ -301,12 +324,14 @@ static int samsung_ufs_phy_probe(struct platform_device *pdev)
+ 		goto out;
+ 	}
+ 
++	UFSMARK("before ioremap pma");
+ 	phy->reg_pma = devm_platform_ioremap_resource_byname(pdev, "phy-pma");
+ 	if (IS_ERR(phy->reg_pma)) {
+ 		err = PTR_ERR(phy->reg_pma);
+ 		goto out;
+ 	}
+ 
++	UFSMARK("before syscon lookup");
+ 	phy->reg_pmu = syscon_regmap_lookup_by_phandle(dev->of_node,
+ 						       "samsung,pmu-syscon");
+ 	if (IS_ERR(phy->reg_pmu)) {
+@@ -315,6 +340,7 @@ static int samsung_ufs_phy_probe(struct platform_device *pdev)
+ 		goto out;
+ 	}
+ 
++	UFSMARK("before phy_create");
+ 	gen_phy = devm_phy_create(dev, NULL, &samsung_ufs_phy_ops);
+ 	if (IS_ERR(gen_phy)) {
+ 		err = PTR_ERR(gen_phy);
+@@ -335,6 +361,7 @@ static int samsung_ufs_phy_probe(struct platform_device *pdev)
+ 
+ 	phy->lane_cnt = PHY_DEF_LANE_CNT;
+ 
++	UFSMARK("before clks_init");
+ 	err = samsung_ufs_phy_clks_init(phy);
+ 	if (err) {
+ 		dev_err(dev, "failed to get phy clocks\n");
+@@ -343,6 +370,7 @@ static int samsung_ufs_phy_probe(struct platform_device *pdev)
+ 
+ 	phy_set_drvdata(gen_phy, phy);
+ 
++	UFSMARK("before provider_register");
+ 	phy_provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
+ 	if (IS_ERR(phy_provider)) {
+ 		err = PTR_ERR(phy_provider);
+diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
+index 13e6357a8..be2fb3957 100644
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -44,6 +44,24 @@
+ #define CREATE_TRACE_POINTS
+ #include "ufs_trace.h"
+ 
++/*
++ * Маркер трассировки bring-up'а (временный, в апстрим не идёт).
++ *
++ * Голый pr_emerg тут бесполезен: на dreamlte единственная консоль — fbcon
++ * на 1440x2960 без ускорения, он рисует строку на порядки медленнее, чем
++ * они печатаются, и при зависании на экране остаётся не последняя
++ * выполненная строка, а последняя ОТРИСОВАННАЯ. Мы на этом уже один раз
++ * обманулись: экран показывал остановку в ufshcd_alloc_host(), где нет ни
++ * одного обращения к железу.
++ *
++ * mdelay, а не msleep: busy-wait не отдаёт процессор и работает в любом
++ * контексте, включая атомарный.
++ */
++#define UFSMARK(fmt, ...) do {					\
++	pr_emerg("UFSTRACE: " fmt "\n", ##__VA_ARGS__);	\
++	mdelay(60);						\
++} while (0)
++
+ #define UFSHCD_ENABLE_INTRS	(UTP_TRANSFER_REQ_COMPL |\
+ 				 UTP_TASK_REQ_COMPL |\
+ 				 UFSHCD_ERROR_MASK)
+@@ -5114,6 +5132,7 @@ static int ufshcd_hba_execute_hce(struct ufs_hba *hba)
+ 
+ int ufshcd_hba_enable(struct ufs_hba *hba)
+ {
++	UFSMARK("ufshcd_hba_enable enter");
+ 	int ret;
+ 
+ 	if (hba->quirks & UFSHCI_QUIRK_BROKEN_HCE) {
+@@ -5243,6 +5262,7 @@ static int ufshcd_validate_link_params(struct ufs_hba *hba)
+  */
+ static int ufshcd_link_startup(struct ufs_hba *hba)
+ {
++	UFSMARK("ufshcd_link_startup enter");
+ 	int ret;
+ 	int retries = DME_LINKSTARTUP_RETRIES;
+ 	bool link_startup_again = false;
+@@ -9402,6 +9422,7 @@ static int ufshcd_device_init(struct ufs_hba *hba, bool init_dev_params)
+  */
+ static int ufshcd_probe_hba(struct ufs_hba *hba, bool init_dev_params)
+ {
++	UFSMARK("ufshcd_probe_hba enter");
+ 	int ret;
+ 
+ 	if (!hba->pm_op_in_progress &&
+@@ -11058,6 +11079,7 @@ static int ufshcd_add_scsi_host(struct ufs_hba *hba)
+  */
+ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
+ {
++	UFSMARK("ufshcd_init enter");
+ 	int err;
+ 	struct Scsi_Host *host = hba->host;
+ 	struct device *dev = hba->dev;
+@@ -11111,10 +11133,12 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
+ 	 */
+ 	hba->vcc_off_delay_us = 2000;
+ 
++	UFSMARK("I1 ufshcd_init: перед hba_init (вызовет exynos_ufs_init)");
+ 	err = ufshcd_hba_init(hba);
+ 	if (err)
+ 		goto out_error;
+ 
++	UFSMARK("I2 hba_init ok -> читаем capabilities");
+ 	/* Read capabilities registers */
+ 	err = ufshcd_hba_capabilities(hba);
+ 	if (err)
+diff --git a/drivers/ufs/host/ufs-exynos.c b/drivers/ufs/host/ufs-exynos.c
+index b2f65c465..f418b6d6c 100644
+--- a/drivers/ufs/host/ufs-exynos.c
++++ b/drivers/ufs/host/ufs-exynos.c
+@@ -28,6 +28,24 @@
+ 
+ #include "ufs-exynos.h"
+ 
++/*
++ * Маркер трассировки bring-up'а (временный, в апстрим не идёт).
++ *
++ * Голый pr_emerg тут бесполезен: на dreamlte единственная консоль — fbcon
++ * на 1440x2960 без ускорения, он рисует строку на порядки медленнее, чем
++ * они печатаются, и при зависании на экране остаётся не последняя
++ * выполненная строка, а последняя ОТРИСОВАННАЯ. Мы на этом уже один раз
++ * обманулись: экран показывал остановку в ufshcd_alloc_host(), где нет ни
++ * одного обращения к железу.
++ *
++ * mdelay, а не msleep: busy-wait не отдаёт процессор и работает в любом
++ * контексте, включая атомарный.
++ */
++#define UFSMARK(fmt, ...) do {					\
++	pr_emerg("UFSTRACE: " fmt "\n", ##__VA_ARGS__);	\
++	mdelay(60);						\
++} while (0)
++
+ #define DATA_UNIT_SIZE		4096
+ 
+ /*
+@@ -848,17 +866,26 @@ static void exynos_ufs_config_smu(struct exynos_ufs *ufs)
+ 	if (ufs->opts & EXYNOS_UFS_OPT_UFSPR_SECURE)
+ 		return;
+ 
++	UFSMARK("S1 config_smu вход");
+ 	exynos_ufs_disable_auto_ctrl_hcc_save(ufs, &val);
++	UFSMARK("S2 hcc_save ok (это была запись в vs_hci)");
+ 
+ 	/* make encryption disabled by default */
+ 	reg = ufsp_readl(ufs, UFSPRSECURITY);
++	UFSMARK("S3 ufsp read ok = 0x%08x", reg);
+ 	ufsp_writel(ufs, reg | NSSMU, UFSPRSECURITY);
++	UFSMARK("S4 UFSPRSECURITY записан");
+ 	ufsp_writel(ufs, 0x0, UFSPSBEGIN0);
++	UFSMARK("S5 UFSPSBEGIN0 записан");
+ 	ufsp_writel(ufs, 0xffffffff, UFSPSEND0);
++	UFSMARK("S6 UFSPSEND0 записан");
+ 	ufsp_writel(ufs, 0xff, UFSPSLUN0);
++	UFSMARK("S7 UFSPSLUN0 записан");
+ 	ufsp_writel(ufs, 0xf1, UFSPSCTRL0);
++	UFSMARK("S8 UFSPSCTRL0 записан");
+ 
+ 	exynos_ufs_auto_ctrl_hcc_restore(ufs, &val);
++	UFSMARK("S9 config_smu ЗАВЕРШЁН");
+ }
+ 
+ static void exynos_ufs_config_sync_pattern_mask(struct exynos_ufs *ufs,
+@@ -1026,6 +1053,7 @@ static void exynos_ufs_specify_nexus_t_tm_req(struct ufs_hba *hba,
+ 
+ static int exynos_ufs_phy_init(struct exynos_ufs *ufs)
+ {
++	UFSMARK("exynos_ufs_phy_init enter");
+ 	struct ufs_hba *hba = ufs->hba;
+ 	struct phy *generic_phy = ufs->phy;
+ 	int ret = 0;
+@@ -1131,6 +1159,7 @@ static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
+ 
+ static int exynos_ufs_pre_link(struct ufs_hba *hba)
+ {
++	UFSMARK("pre_link enter");
+ 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+ 
+ 	/* hci */
+@@ -1174,6 +1203,7 @@ static void exynos_ufs_fit_aggr_timeout(struct exynos_ufs *ufs)
+ 
+ static int exynos_ufs_post_link(struct ufs_hba *hba)
+ {
++	UFSMARK("post_link enter");
+ 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+ 	struct phy *generic_phy = ufs->phy;
+ 	struct exynos_ufs_uic_attr *attr = ufs->drv_data->uic_attr;
+@@ -1532,6 +1562,7 @@ static void exynos_ufs_fmp_resume(struct ufs_hba *hba)
+ 
+ static int exynos_ufs_init(struct ufs_hba *hba)
+ {
++	UFSMARK("exynos_ufs_init enter");
+ 	struct device *dev = hba->dev;
+ 	struct platform_device *pdev = to_platform_device(dev);
+ 	struct exynos_ufs *ufs;
+@@ -1548,6 +1579,8 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+ 		return PTR_ERR(ufs->reg_hci);
+ 	}
+ 
++	/* unipro */
++	UFSMARK("E1 vs_hci ioremap ok");
+ 	/* unipro */
+ 	ufs->reg_unipro = devm_platform_ioremap_resource_byname(pdev, "unipro");
+ 	if (IS_ERR(ufs->reg_unipro)) {
+@@ -1555,6 +1588,8 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+ 		return PTR_ERR(ufs->reg_unipro);
+ 	}
+ 
++	/* ufs protector */
++	UFSMARK("E2 unipro ioremap ok");
+ 	/* ufs protector */
+ 	ufs->reg_ufsp = devm_platform_ioremap_resource_byname(pdev, "ufsp");
+ 	if (IS_ERR(ufs->reg_ufsp)) {
+@@ -1562,12 +1597,14 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+ 		return PTR_ERR(ufs->reg_ufsp);
+ 	}
+ 
++	UFSMARK("E3 ufsp ioremap ok");
+ 	ret = exynos_ufs_parse_dt(dev, ufs);
+ 	if (ret) {
+ 		dev_err(dev, "failed to get dt info.\n");
+ 		goto out;
+ 	}
+ 
++	UFSMARK("E4 parse_dt ok");
+ 	ufs->phy = devm_phy_get(dev, "ufs-phy");
+ 	if (IS_ERR(ufs->phy)) {
+ 		ret = PTR_ERR(ufs->phy);
+@@ -1575,8 +1612,10 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+ 		goto out;
+ 	}
+ 
++	UFSMARK("E5 phy_get ok");
+ 	exynos_ufs_priv_init(hba, ufs);
+ 
++	UFSMARK("E6 priv_init ok -> fmp_init (ЧИТАЕТ CAP)");
+ 	exynos_ufs_fmp_init(hba, ufs);
+ 
+ 	if (ufs->drv_data->drv_init) {
+@@ -1587,13 +1626,17 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+ 		}
+ 	}
+ 
++	UFSMARK("E7 fmp/drv_init ok");
+ 	ret = exynos_ufs_get_clk_info(ufs);
+ 	if (ret)
+ 		goto out;
++	UFSMARK("E8 get_clk_info ok");
+ 	exynos_ufs_specify_phy_time_attr(ufs);
+ 
++	UFSMARK("E9 phy_time_attr ok -> config_smu (ПИШЕТ в vs_hci и ufsp)");
+ 	exynos_ufs_config_smu(ufs);
+ 
++	UFSMARK("E10 config_smu ok - exynos_ufs_init ЗАВЕРШЁН");
+ 	hba->host->dma_alignment = DATA_UNIT_SIZE - 1;
+ 	return 0;
+ 
+@@ -1701,6 +1744,7 @@ static void exynos_ufs_post_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
+ static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
+ 					enum ufs_notify_change_status status)
+ {
++	UFSMARK("hce_enable_notify status=%d", status);
+ 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+ 	int ret = 0;
+ 
+@@ -1742,6 +1786,7 @@ static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
+ static int exynos_ufs_link_startup_notify(struct ufs_hba *hba,
+ 					  enum ufs_notify_change_status status)
+ {
++	UFSMARK("link_startup_notify status=%d", status);
+ 	int ret = 0;
+ 
+ 	switch (status) {
+@@ -2126,6 +2171,7 @@ static struct ufs_hba_variant_ops ufs_hba_exynosauto_vh_ops = {
+ 
+ static int exynos_ufs_probe(struct platform_device *pdev)
+ {
++	UFSMARK("exynos_ufs_probe enter");
+ 	int err;
+ 	struct device *dev = &pdev->dev;
+ 	const struct ufs_hba_variant_ops *vops = &ufs_hba_exynos_ops;
+@@ -2258,6 +2304,45 @@ static struct exynos_ufs_uic_attr fsd_uic_attr = {
+ 	.pa_dbg_opt_suite1_off		= PA_DBG_OPTION_SUITE,
+ };
+ 
++/*
++ * Exynos8895 отличается от exynos7 ровно одним, но фатально: блок защиты
++ * UFS (UFSP, он же SMU) принадлежит защищённому миру. Чтение его регистров
++ * из EL1 отдаёт нули, а ЗАПИСЬ поднимает асинхронный внешний аборт:
++ *
++ *   SError Interrupt on CPU5, code 0x00000000bf000002
++ *   pc : exynos_ufs_config_smu+0xc0/0xe8 [ufs_exynos]
++ *   Kernel panic - not syncing: Asynchronous SError Interrupt
++ *   SMP: stopping secondary CPUs
++ *
++ * Именно это всё время выглядело как "телефон намертво завис в случайном
++ * месте": ядро паниковало, гасило остальные ядра, а вывод паники не успевал
++ * дойти до fbcon.
++ *
++ * EXYNOS_UFS_OPT_UFSPR_SECURE ровно для такого случая и заведён — с ним
++ * exynos_ufs_config_smu() не трогает UFSP вообще, а FMP инициализируется
++ * через SMC, как это уже сделано для gs101.
++ */
++static const struct exynos_ufs_drv_data exynos8895_ufs_drvs = {
++	.uic_attr		= &exynos7_uic_attr,
++	.quirks			= UFSHCD_QUIRK_PRDT_BYTE_GRAN |
++				  UFSHCI_QUIRK_BROKEN_REQ_LIST_CLR |
++				  UFSHCI_QUIRK_BROKEN_HCE |
++				  UFSHCI_QUIRK_SKIP_RESET_INTR_AGGR |
++				  UFSHCD_QUIRK_BROKEN_OCS_FATAL_ERROR |
++				  UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL |
++				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING,
++	.opts			= EXYNOS_UFS_OPT_HAS_APB_CLK_CTRL |
++				  EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL |
++				  EXYNOS_UFS_OPT_BROKEN_RX_SEL_IDX |
++				  EXYNOS_UFS_OPT_SKIP_CONNECTION_ESTAB |
++				  EXYNOS_UFS_OPT_USE_SW_HIBERN8_TIMER |
++				  EXYNOS_UFS_OPT_UFSPR_SECURE,
++	.pre_link		= exynos7_ufs_pre_link,
++	.post_link		= exynos7_ufs_post_link,
++	.pre_pwr_change		= exynos7_ufs_pre_pwr_change,
++	.post_pwr_change	= exynos7_ufs_post_pwr_change,
++};
++
+ static const struct exynos_ufs_drv_data fsd_ufs_drvs = {
+ 	.uic_attr               = &fsd_uic_attr,
+ 	.quirks                 = UFSHCD_QUIRK_PRDT_BYTE_GRAN |
+@@ -2314,6 +2399,8 @@ static const struct of_device_id exynos_ufs_of_match[] = {
+ 	  .data	      = &gs101_ufs_drvs },
+ 	{ .compatible = "samsung,exynos7-ufs",
+ 	  .data	      = &exynos_ufs_drvs },
++	{ .compatible = "samsung,exynos8895-ufs",
++	  .data	      = &exynos8895_ufs_drvs },
+ 	{ .compatible = "samsung,exynosautov9-ufs",
+ 	  .data	      = &exynosauto_ufs_drvs },
+ 	{ .compatible = "samsung,exynosautov9-ufs-vh",
+diff --git a/drivers/ufs/host/ufshcd-pltfrm.c b/drivers/ufs/host/ufshcd-pltfrm.c
+index c2dafb583..fa1a67681 100644
+--- a/drivers/ufs/host/ufshcd-pltfrm.c
++++ b/drivers/ufs/host/ufshcd-pltfrm.c
+@@ -8,6 +8,7 @@
+  *	Vinayak Holikatti <h.vinayak@samsung.com>
+  */
+ 
++#include <linux/delay.h>
+ #include <linux/clk.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+@@ -19,6 +20,24 @@
+ #include "ufshcd-pltfrm.h"
+ #include <ufs/unipro.h>
+ 
++/*
++ * Маркер трассировки bring-up'а (временный, в апстрим не идёт).
++ *
++ * Голый pr_emerg тут бесполезен: на dreamlte единственная консоль — fbcon
++ * на 1440x2960 без ускорения, он рисует строку на порядки медленнее, чем
++ * они печатаются, и при зависании на экране остаётся не последняя
++ * выполненная строка, а последняя ОТРИСОВАННАЯ. Мы на этом уже один раз
++ * обманулись: экран показывал остановку в ufshcd_alloc_host(), где нет ни
++ * одного обращения к железу.
++ *
++ * mdelay, а не msleep: busy-wait не отдаёт процессор и работает в любом
++ * контексте, включая атомарный.
++ */
++#define UFSMARK(fmt, ...) do {					\
++	pr_emerg("UFSTRACE: " fmt "\n", ##__VA_ARGS__);	\
++	mdelay(60);						\
++} while (0)
++
+ #define UFSHCD_DEFAULT_LANES_PER_DIRECTION		2
+ 
+ static int ufshcd_parse_clock_info(struct ufs_hba *hba)
+@@ -501,10 +520,12 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
+ 	if (IS_ERR(mmio_base))
+ 		return PTR_ERR(mmio_base);
+ 
++	UFSMARK("P1 ioremap done");
+ 	irq = platform_get_irq(pdev, 0);
+ 	if (irq < 0)
+ 		return irq;
+ 
++	UFSMARK("P2 get_irq done");
+ 	err = ufshcd_alloc_host(dev, &hba);
+ 	if (err) {
+ 		dev_err(dev, "Allocation failed\n");
+@@ -513,12 +534,14 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
+ 
+ 	hba->vops = vops;
+ 
++	UFSMARK("P3 alloc_host done");
+ 	err = ufshcd_parse_clock_info(hba);
+ 	if (err) {
+ 		dev_err(dev, "%s: clock parse failed %d\n",
+ 				__func__, err);
+ 		return err;
+ 	}
++	UFSMARK("P4 parse_clock done");
+ 	err = ufshcd_parse_regulator_info(hba);
+ 	if (err) {
+ 		dev_err(dev, "%s: regulator init failed %d\n",
+@@ -526,14 +549,17 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
+ 		return err;
+ 	}
+ 
++	UFSMARK("P5 parse_regulator done");
+ 	ufshcd_init_lanes_per_dir(hba);
+ 
++	UFSMARK("P6 lanes_per_dir done");
+ 	err = ufshcd_parse_operating_points(hba);
+ 	if (err) {
+ 		dev_err(dev, "%s: OPP parse failed %d\n", __func__, err);
+ 		return err;
+ 	}
+ 
++	UFSMARK("P7 parse_opp done -> calling ufshcd_init");
+ 	err = ufshcd_init(hba, mmio_base, irq);
+ 	if (err) {
+ 		dev_err_probe(dev, err, "Initialization failed with error %d\n",
