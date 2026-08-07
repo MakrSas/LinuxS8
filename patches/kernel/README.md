@@ -16,10 +16,23 @@ git -C build/src/linux apply /path/to/patches/kernel/all-local-changes.patch
 
 | Файл | Что это |
 |---|---|
-| `0001-mmc-dw_mmc-exynos-exynos8895-data-timeout.patch` | **Главная правка.** Чинит чтение данных с microSD. Единственный кандидат на отправку в апстрим как есть. |
-| `0002-arm64-dts-exynos8895-dreamlte-microsd-and-bringup.patch` | Device tree: питание карты через GPIO (`vmmc` = gpb1-1), тактовая частота 50 МГц, тайминги `<3 3>`, подтяжки CMD/DAT, `cap-sd-highspeed`, `bootargs` с `clk_ignore_unused pd_ignore_unused`, увеличенный ramoops, отключённые узлы `ufs`/`ufs_phy`. Часть отсюда (SD) пригодна для апстрима, часть (bootargs, UFS-узлы) — чисто локальный bring-up. |
-| `0003-local-debug-instrumentation.patch` | **Только для отладки, в апстрим не идёт.** Расширенный дамп ошибки в `dw_mmc.c`, поддержка свойства `fifo-mode`, `pr_emerg`-трассировка по всему пути UFS/PHY. |
-| `all-local-changes.patch` | Все три вместе — точное состояние рабочего дерева на момент коммита. |
+| `0001-mmc-dw_mmc-exynos-exynos8895-data-timeout.patch` | Чинит чтение данных с microSD. Годится в апстрим как есть. |
+| `0002-arm64-dts-exynos8895-dreamlte-microsd-and-bringup.patch` | Device tree: питание карты через GPIO (`vmmc` = gpb1-1), тактовая частота 50 МГц, тайминги `<3 3>`, подтяжки CMD/DAT, `cap-sd-highspeed`, узлы `ufs`/`ufs_phy` с новым compatible и `pclk-freq-avail-range`, `bootargs` с `clk_ignore_unused pd_ignore_unused`, увеличенный ramoops. Часть отсюда пригодна для апстрима, часть (bootargs, ramoops) — чисто локальный bring-up. |
+| `0003-mmc-dw_mmc-honour-fifo-mode-property.patch` | Свойство `fifo-mode` описано в биндинге («Enables FIFO mode, i.e. PIO»), но драйвер его никогда не читал — режим брался только из `HCON`. Самостоятельная мелкая правка, годная в апстрим. Нами не используется: PIO пробовали и отвергли, причина была в другом. |
+| `0004-ufs-exynos8895-support.patch` | **Главная правка.** Поддержка UFS на Exynos8895: свой PHY-драйвер с таблицей калибровки PMA, `exynos8895_ufs_drvs` с последовательностью старта линка, чтение `pclk-freq-avail-range`, хук `vops->get_upmcrs` для контроллеров без поля UPMCRS в `HCS`. Разбор — в [docs/ufs-bringup.md](../../docs/ufs-bringup.md). |
+| `all-local-changes.patch` | Все вместе — точное состояние рабочего дерева на момент коммита. |
+
+Отладочной трассировки (`UFSMARK`/`UFSTRACE`, дампы регистров `dw_mmc`)
+здесь больше нет: она сделала своё дело и снята 2026-08-08. С встроенным в
+ядро драйвером UFS её маркеры срабатывали бы на каждой загрузке, и каждый
+стоил `mdelay(60)` плюс перерисовку fbcon. Искать её, если понадобится, — в
+истории git.
+
+Из отладки уцелело одно, и намеренно: `ufshcd_dme_set_attr()` и
+`ufshcd_dme_get_attr()` теперь печатают в сообщении об ошибке ещё и код
+возврата. Без него отказ атрибута выглядит так же, как таймаут; именно этот
+код (`ret=1`, `INVALID_MIB_ATTRIBUTE`) разделил две гипотезы и снял
+подозрение с шины.
 
 ## Суть главной правки (0001)
 

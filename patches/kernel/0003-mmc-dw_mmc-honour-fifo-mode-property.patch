@@ -1,0 +1,24 @@
+diff --git a/drivers/mmc/host/dw_mmc.c b/drivers/mmc/host/dw_mmc.c
+index d734d0104..b4b00aaa2 100644
+--- a/drivers/mmc/host/dw_mmc.c
++++ b/drivers/mmc/host/dw_mmc.c
+@@ -2919,6 +2919,19 @@ static void dw_mci_init_dma(struct dw_mci *host)
+ 	* simpler request/acknowledge handshake mechanism and both of them
+ 	* are regarded as external dma master for dw_mmc.
+ 	*/
++	/*
++	 * The binding documents "fifo-mode" as "Enables FIFO mode, i.e. PIO"
++	 * but nothing here ever honoured it -- the transfer mode is taken
++	 * purely from HCON. Needed on exynos8895-dreamlte, where IDMAC in
++	 * 64-bit mode fails every data transfer (commands are fine, so the
++	 * card enumerates and then every read returns -EIO) on a board whose
++	 * RAM extends past 4G.
++	 */
++	if (device_property_read_bool(host->dev, "fifo-mode")) {
++		dev_info(host->dev, "fifo-mode requested, using PIO\n");
++		goto no_dma;
++	}
++
+ 	host->use_dma = SDMMC_GET_TRANS_MODE(mci_readl(host, HCON));
+ 	if (host->use_dma == DMA_INTERFACE_IDMA) {
+ 		host->use_dma = TRANS_MODE_IDMAC;
