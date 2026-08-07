@@ -29,6 +29,10 @@ else
 fi
 echo ""
 
+echo "== проба областей регистров =="
+"$ADB" shell "cat $SD/var/log/dreamlte/region-probe.txt 2>/dev/null" | tee "$OUT/region-probe.txt" || echo "  (нет)"
+echo ""
+
 echo "== последние пробы стека (если сэмплер работал) =="
 "$ADB" shell "tail -30 $SD/var/log/dreamlte/stack-samples.txt 2>/dev/null" || echo "  (проб нет)"
 "$ADB" pull "$SD/var/log/dreamlte/stack-samples.txt" "$OUT/stack-samples.txt" >/dev/null 2>&1 || true
