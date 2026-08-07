@@ -1,0 +1,16 @@
+[Unit]
+Description=dreamlte: пульс (жива ли система, когда экран замер)
+DefaultDependencies=no
+After=local-fs.target
+Before=dreamlte-lab.service
+
+[Service]
+Type=simple
+ExecStart=/root/lab/dreamlte-heartbeat.sh
+Restart=always
+# Ниже обычного, чтобы пульс не мешал самому эксперименту, но он должен
+# продолжать идти даже когда система под нагрузкой.
+Nice=-5
+
+[Install]
+WantedBy=sysinit.target

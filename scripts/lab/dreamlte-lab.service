@@ -1,0 +1,19 @@
+[Unit]
+Description=dreamlte: прогон эксперимента по bring-up'у
+# После systemd-pstore, потому что первое, что делает runner, — разбирает
+# то, что pstore подобрал с прошлой (возможно, зависшей) загрузки.
+After=multi-user.target systemd-pstore.service
+Wants=systemd-pstore.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/lab/lab-runner.sh
+RemainAfterExit=yes
+# Без таймаута: эксперимент имеет полное право подвесить систему, это и
+# есть предмет изучения. Убивать его по таймауту значит терять данные.
+TimeoutStartSec=infinity
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
