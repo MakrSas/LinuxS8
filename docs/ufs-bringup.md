@@ -389,50 +389,92 @@ org.gnome.Shell@wayland.service: Failed with result 'timeout'.
 
 ---
 
-## 9. Что скачать для следующего шага и что оттуда взять
+## 9. Даунстрим Samsung: где что лежит
 
-Дальше без даунстрим-исходников не обойтись: нужна настоящая таблица
-калибровки PMA для Exynos8895 и подтверждение двух адресов. Всё это есть в
-вендорском ядре Samsung.
+Даунстрим склонирован в `~/build/src/downstream-8895` (репозиторий
+`Dyneteve/android_kernel_samsung_universal8895`, `--depth 1`).
 
-### 9.1. Даунстрим-ядро Exynos8895
+**Главное про его устройство:** отдельного PHY-драйвера у Samsung нет, PMA
+программируется прямо из драйвера UFS, а сама последовательность старта
+лежит **не в коде, а в device tree**. Узел `ufs@0x11120000` в
+`arch/arm64/boot/dts/exynos/exynos8895.dtsi` (строки ~762–1045) содержит:
 
-```bash
-git clone --depth 1 https://github.com/Dyneteve/android_kernel_samsung_universal8895 \
-	build/src/downstream-8895
+| Свойство | Когда применяется | Куда уехало у нас |
+|---|---|---|
+| `phy-init` | до `DME_LINK_STARTUP` | записи `PHY_PMA_*` → `phy-exynos8895-ufs.c`, остальные → `exynos8895_ufs_pre_link()` |
+| `post-phy-init` | после старта линка | `exynos8895_ufs_post_link()` |
+| `calib-of-hs-rate-a/b` | перед сменой режима на HS | `exynos8895_pre_pwr_hs_cfg[]` + `exynos8895_ufs_pre_pwr_change()` |
+| `post-calib-of-hs-rate-b` | после смены режима | хук `wait_for_cdr` в PHY-драйвере |
+| `calib-of-pwm`, `pre-clk-off`, `post-clk-on`, `lane1-sq-off` | PWM, гашение тактов, отключение линии 1 | пока не перенесены |
+
+Каждая запись — четвёрка «адрес, значение, маска режимов, тип». Тип
+(`PHY_PMA_COMN`, `PHY_PMA_TRSV`, `PHY_PCS_RX`, `PHY_PCS_TX`,
+`UNIPRO_STD_MIB`, `UNIPRO_DBG_MIB`, `UNIPRO_DBG_PRD`, `COMMON_WAIT`,
+`PHY_CDR_WAIT`, …) определяет, куда идёт запись; разбирает их
+`exynos_ufs_config_uic()` в `drivers/scsi/ufs/ufs-exynos.c`. Константы типов
+— в `include/dt-bindings/ufs/ufs.h`.
+
+### 9.1. Адресация PMA у Exynos8895
+
+Это отдельный источник ошибок, поэтому явно (`drivers/scsi/ufs/ufs-exynos.h`,
+ветка `!EXYNOS7420 && !EXYNOS8890`):
+
+```c
+#define PHY_PMA_COMN_ADDR(reg)		(reg)
+#define PHY_PMA_TRSV_ADDR(reg, lane)	((reg) + (0x140 * (lane)))
 ```
 
-(Это тот же источник, из которого уже брались адреса регистров UFS — они
-подтвердились независимо через путь `/dev/block/platform/11120000.ufs/...`
-в TWRP, так что источнику можно доверять. Если репозиторий пропадёт, годится
-любой форк `android_kernel_samsung_universal8895`, а также ядра
-`universal8895` от других устройств — dreamlte/dream2lte/greatlte.)
+То есть в вендорских таблицах смещения **уже байтовые**, а шаг между линиями
+`0x140` байт. Блок COMN занимает `0x000..0x0BF`, TRSV линии 0 начинается с
+`0x0C0`, линии 1 — с `0x200` (отсюда подписи вида `TRSVx_14(0x110/0x250)`).
 
-**Что искать внутри:**
+Макросы `phy-samsung-ufs.h` в mainline принимают **номер регистра** и сами
+домножают на 4, поэтому в `phy-exynos8895-ufs.c` все смещения поделены на 4,
+а шаг линии равен `0x140 / 4 = 0x50`. Байтовый адрес из даунстрима оставлен
+в комментарии к каждой строке — сверка механическая.
 
-| Что нужно | Где обычно лежит у Samsung |
-|---|---|
-| Таблица калибровки PMA (сотни пар «регистр — значение») | `drivers/scsi/ufs/ufs-exynos.c`, `ufs-exynos.h`, либо отдельные `ufs-cal-*.c` / `ufs-cal-if.c` |
-| Смещение регистра изоляции PHY в PMU | `include/soc/samsung/exynos-pmu.h`, `arch/arm64/.../regs-pmu.h`, либо литерал `0x16480724` в dts под узлом `ufs-phy-sys` |
-| Источник и частота `ref_clk` PHY | узел `ufs` в `arch/arm64/boot/dts/exynos/exynos8895*.dts*` |
-| Последовательность старта линка | `exynos_ufs_pre_link()` / `..._post_link()` даунстрима — сверить с нашим `exynos8895_ufs_pre_link()` |
+Для сравнения: у exynos7 `PHY_TRSV_CH_OFFSET` = `0x30` регистров, то есть
+`0xC0` байт. Пока мы использовали шаблон 7420, все записи для линии 1
+уезжали не туда.
 
-### 9.2. Что именно проверить в первую очередь
+### 9.2. Что подтвердилось из прежних догадок
 
-1. **Существуют ли у 8895 вообще symbol-клоки PHY.** Ранее проверялось и
-   ответ был «нет, есть только 4 UFS-клока: aclk/fmp/unipro + мультиплексор».
-   Если подтвердится — четырёхтактовая модель `samsung,exynos7-ufs-phy`
-   неверна в принципе, и нужен свой `samsung,exynos8895-ufs-phy` с одним
-   `ref_clk` (как у `autov9`, `autov920`, `gs101`).
-2. **Смещение изоляции.** У нас `0x724`, у драйвера по умолчанию `0x720`.
-   Из userspace PMU не читается (bus error), так что проверять придётся
-   либо по исходникам, либо инструментированием драйвера (прочитать
-   регистр через тот же regmap до и после записи и напечатать).
-3. **Таблица калибровки.** Самая объёмная часть. Переносится в новый файл
-   `drivers/phy/samsung/phy-exynos8895-ufs.c` по образцу
-   `phy-gs101-ufs.c` / `phy-exynos7-ufs.c`.
+- **Изоляция PHY = PMU `0x724`.** Литерал `0x16480724` в подузле
+  `ufs-phy-sys` плюс место записи: `exynos_ufs_ctrl_phy_pwr()` делает
+  буквально `writel(!!en, ufs->phy.reg_pmu)`. Вопрос закрыт.
+- **Symbol-клоков PHY не существует.** Узлу `ufs` отданы ровно два клока:
+  `GATE_UFS_EMBD` (aclk) и `UFS_EMBD` (unipro). Четырёхтактовая модель
+  `samsung,exynos7-ufs-phy` для 8895 неверна в принципе.
+- **Атрибуты M-PHY от 7420 не нужны:** `exynos_ufs_config_phy_time_v()` и
+  `exynos_ufs_config_phy_cap_attr()` для `hw_rev >= UFS_VER_0004`
+  (8895 — это 0004) выходят первой же строкой. `SKIP_CONFIG_PHY_ATTR`
+  выставлен верно.
+- **`establish_connt` тоже пропускается**, а `N_DeviceID` /
+  `T_ConnectionState` пишутся до старта линка — как у `gs101_ufs_pre_link()`.
 
-### 9.3. Что НЕ нужно скачивать
+### 9.3. Пять ошибок, которые нашлись при сверке
+
+1. **`UFSHCI_QUIRK_BROKEN_HCE` был лишним.** Даунстрим включает обход HCE
+   (`UFSHCD_QUIRK_USE_OF_HCE`) **только для `UFS_VER_0003`, то есть для
+   Exynos8890**. У нас контроллер поднимается штатной записью HCE.
+2. **`EXYNOS_UFS_OPT_BROKEN_RX_SEL_IDX` был лишним** — с ним
+   `rx_sel_idx = 0`, и все атрибуты PCS RX уходили с селектором
+   передатчика. У даунстрима `RX_LANE_0 = 4`. Отказа в логе не видно: за
+   гейтом `0x200` шина принимает любой адрес.
+3. **Период такта PCS был вдвое неверным.** Даунстрим пишет в
+   `VND_RX_CLK_PRD`/`VND_TX_CLK_PRD` период **pclk** простым делением, а не
+   период mclk с округлением вверх (формула gs101). При
+   `pclk-freq-avail-range = <70000000 166000000>` частота 166.5625 МГц
+   делится ровно один раз → APB UniPro 83.28 МГц → период 12 нс, а не 7.
+4. **Не хватало двух вендорских записей HCI** (блок 0xF8+, которого у 7420
+   нет): `HCI_UFS_ACG_DISABLE` (0xFC бит 0, выключение HWACG на время
+   инициализации) и `HCI_MPHY_REFCLK_SEL` (0x108 бит 0, выбор пути опорного
+   такта M-PHY). Вторая — главный подозреваемый по таймауту
+   `DME_LINK_STARTUP`: без опорного такта PLL не захватывается, и команда
+   не завершается вообще.
+5. **Шаг между линиями PMA** — см. 9.1.
+
+### 9.4. Что НЕ нужно скачивать
 
 - Ничего для microSD — она работает.
 - Ничего для сборки: тулчейн, uniLoader, busybox, ядро уже в `build/`.
@@ -444,13 +486,12 @@ git clone --depth 1 https://github.com/Dyneteve/android_kernel_samsung_universal
 
 | Что | Значение |
 |---|---|
-| Последний коммит | `pre_link принят целиком, линк не встал; GNOME убивал таймаут` |
-| Прошито в `sda7` | `build/device-backups/boot_prelink.img`, md5 `b2d69fc523bcb38ab3d18def1358a99e` |
+| Прошито в `sda7` | `build/device-backups/boot_phy8895.img`, md5 `b12c3b397a71eaf74397636e6ab03a89` |
 | Ядро | `build/src/linux`, база `0d8395707`, изменения продублированы в `patches/kernel/` |
 | Модули на карте | синхронизированы с этой сборкой (`scripts/push-modules.sh`) |
-| Карта | 7.0 ГБ, занято 3.2 ГБ, ФС чистая |
-| Флаг `ARMED` | снят — следующая загрузка пойдёт без опыта |
-| Телефон | в TWRP |
+| Даунстрим | `~/build/src/downstream-8895` |
+| Опыт | `experiments/07-phy8895.sh` |
 
 Откат, если что-то пойдёт не так: `build/device-backups/boot_orig.img` —
-родной раздел BOOT, снятый до первой перепрошивки.
+родной раздел BOOT, снятый до первой перепрошивки. Предыдущая сборка —
+`boot_prelink.img` (md5 `b2d69fc523bcb38ab3d18def1358a99e`).

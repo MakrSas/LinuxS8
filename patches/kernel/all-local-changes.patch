@@ -1,5 +1,5 @@
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
-index 305dc72f9..4f02a52e3 100644
+index 305dc72f9..e63f5b818 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
 +++ b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
 @@ -26,6 +26,18 @@ chosen {
@@ -44,7 +44,7 @@ index 305dc72f9..4f02a52e3 100644
  		};
  
  		cont_splash_mem: framebuffer@cc000000 {
-@@ -100,6 +121,73 @@ reg_placeholder: regulator-0 {
+@@ -100,6 +121,72 @@ reg_placeholder: regulator-0 {
  		compatible = "regulator-fixed";
  		regulator-name = "reg-placeholder";
  	};
@@ -97,16 +97,15 @@ index 305dc72f9..4f02a52e3 100644
 +	};
 +};
 +
-+/* 2026-08-07: first attempt (PMU isolation offset left at the exynos7-ufs-phy
-+ * driver default, 0x720) hung boot solid — phy-samsung-ufs probed but never
-+ * returned. Research (see docs/progress-log.md) found the real Exynos8895
-+ * PHY isolation register is 0x724, not 0x720 — the PHY was likely never
-+ * actually taken out of isolation, so link-startup polling spun forever.
-+ * Re-enabling with samsung,pmu-syscon offset corrected to 0x724 (set on the
-+ * ufs_phy node in exynos8895.dtsi) to test that theory. The 4x placeholder
-+ * &oscclk on the PHY clocks is still electrically wrong (see that node's own
-+ * comment) — expect this may still not fully work, but should behave
-+ * differently if the isolation theory is right.
++/*
++ * PHY isolation lives at PMU offset 0x724 on Exynos8895, not the 0x720 the
++ * exynos7-ufs-phy driver defaults to; the offset is overridden on the
++ * ufs_phy node in exynos8895.dtsi.
++ *
++ * 2026-08-08: that node no longer borrows Exynos7420's PHY template. It now
++ * uses samsung,exynos8895-ufs-phy with the PMA calibration table lifted from
++ * the vendor kernel (see drivers/phy/samsung/phy-exynos8895-ufs.c) and a
++ * single real ref_clk instead of four placeholder &oscclk entries.
 + */
 +&ufs_phy {
 +	status = "okay";
@@ -118,7 +117,7 @@ index 305dc72f9..4f02a52e3 100644
  };
  
  &hsi2c_23 {
-@@ -129,19 +217,56 @@ &mmc {
+@@ -129,19 +216,56 @@ &mmc {
  	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd2_cd>;
  	pinctrl-names = "default";
  
@@ -180,7 +179,7 @@ index 305dc72f9..4f02a52e3 100644
  
  	status = "okay";
  };
-@@ -194,3 +319,24 @@ &usi9 {
+@@ -194,3 +318,24 @@ &usi9 {
  	samsung,mode = <USI_MODE_I2C0_1>;
  	status = "okay";
  };
@@ -206,7 +205,7 @@ index 305dc72f9..4f02a52e3 100644
 +	samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
 +};
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
-index ff114cd6c..6609ee142 100644
+index ff114cd6c..a21e68814 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 +++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 @@ -1433,6 +1433,18 @@ mmc: mmc@11500000 {
@@ -228,7 +227,7 @@ index ff114cd6c..6609ee142 100644
  			fifo-depth = <64>;
  			interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH>;
  			#address-cells = <1>;
-@@ -1440,6 +1452,75 @@ mmc: mmc@11500000 {
+@@ -1440,6 +1452,96 @@ mmc: mmc@11500000 {
  			status = "disabled";
  		};
  
@@ -249,14 +248,21 @@ index ff114cd6c..6609ee142 100644
 +		 * this is the leading suspect why. See docs/progress-log.md.
 +		 */
 +		ufs_phy: phy@11124000 {
-+			compatible = "samsung,exynos7-ufs-phy";
++			compatible = "samsung,exynos8895-ufs-phy";
 +			reg = <0x11124000 0x800>;
 +			reg-names = "phy-pma";
 +			samsung,pmu-syscon = <&pmu_system_controller 0x724>;
 +			#phy-cells = <0>;
-+			clocks = <&oscclk>, <&oscclk>, <&oscclk>, <&oscclk>;
-+			clock-names = "ref_clk", "rx1_symbol_clk",
-+				      "rx0_symbol_clk", "tx0_symbol_clk";
++			/*
++			 * Один такт, а не четыре. Четырёхтактовая модель
++			 * (tx0/rx0/rx1_symbol_clk) — это Exynos7420; у 8895
++			 * таких гейтов нет вообще, PHY тактируется от
++			 * опорного через мультиплексор внутри HCI. Раньше
++			 * здесь стояли три фиктивных &oscclk только ради
++			 * того, чтобы devm_clk_bulk_get() не упал.
++			 */
++			clocks = <&oscclk>;
++			clock-names = "ref_clk";
 +			status = "disabled";
 +		};
 +
@@ -296,6 +302,20 @@ index ff114cd6c..6609ee142 100644
 +			 * exynosautov9, exynosautov920 и gs101.
 +			 */
 +			freq-table-hz = <0 0>, <0 0>;
++			/*
++			 * Взято дословно из dts даунстрима, и верхняя граница
++			 * тут не описка: core_clk равен 166.5625 МГц, то есть
++			 * чуть ВЫШЕ 166 МГц, поэтому цикл деления в
++			 * exynos_ufs_get_clk_info() срабатывает ровно один
++			 * раз и даёт pclk_rate = 83.28 МГц.
++			 *
++			 * Это и есть настоящая частота APB-клока UniPro:
++			 * период 12 нс, а не 6, и именно он программируется в
++			 * VND_RX_CLK_PRD / VND_TX_CLK_PRD. Со значениями по
++			 * умолчанию (70..267 МГц) деления бы не было и в PCS
++			 * уехал бы вдвое неверный период.
++			 */
++			pclk-freq-avail-range = <70000000 166000000>;
 +			phys = <&ufs_phy>;
 +			phy-names = "ufs-phy";
 +			status = "disabled";
@@ -427,8 +447,200 @@ index 9ffcd3946..a79302e92 100644
  
  	struct scatterlist	*sg;
  	struct sg_mapping_iter	sg_miter;
+diff --git a/drivers/phy/samsung/Makefile b/drivers/phy/samsung/Makefile
+index 342682638..4b017dbe7 100644
+--- a/drivers/phy/samsung/Makefile
++++ b/drivers/phy/samsung/Makefile
+@@ -6,6 +6,7 @@ obj-$(CONFIG_PHY_SAMSUNG_UFS)		+= phy-exynos-ufs.o
+ phy-exynos-ufs-y			+= phy-gs101-ufs.o
+ phy-exynos-ufs-y			+= phy-samsung-ufs.o
+ phy-exynos-ufs-y			+= phy-exynos7-ufs.o
++phy-exynos-ufs-y			+= phy-exynos8895-ufs.o
+ phy-exynos-ufs-y			+= phy-exynosautov9-ufs.o
+ phy-exynos-ufs-y			+= phy-exynosautov920-ufs.o
+ phy-exynos-ufs-y			+= phy-fsd-ufs.o
+diff --git a/drivers/phy/samsung/phy-exynos8895-ufs.c b/drivers/phy/samsung/phy-exynos8895-ufs.c
+new file mode 100644
+index 000000000..c5a46cf86
+--- /dev/null
++++ b/drivers/phy/samsung/phy-exynos8895-ufs.c
+@@ -0,0 +1,174 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * UFS PHY driver data for Samsung Exynos8895 SoC
++ *
++ * Значения взяты из вендорского ядра Samsung для universal8895
++ * (android_kernel_samsung_universal8895), где вся калибровка PMA лежит не в
++ * коде, а прямо в dts — в узле ufs@0x11120000, свойства phy-init,
++ * calib-of-hs-rate-b и post-calib-of-hs-rate-b. Записи с типом PHY_PMA_COMN
++ * и PHY_PMA_TRSV — это и есть наша таблица.
++ *
++ * Адресация PMA у Exynos8895 отличается от Exynos7420, и это важно:
++ *
++ *   downstream ufs-exynos.h, ветка !EXYNOS7420 && !EXYNOS8890:
++ *     PHY_PMA_COMN_ADDR(reg)       (reg)
++ *     PHY_PMA_TRSV_ADDR(reg, lane) ((reg) + (0x140 * (lane)))
++ *
++ * то есть в вендорской таблице смещения уже байтовые, а шаг между линиями
++ * 0x140 байт. Здесь же макросы phy-samsung-ufs.h принимают НОМЕР регистра и
++ * сами домножают на 4 (PHY_APB_ADDR). Поэтому все смещения ниже поделены на
++ * 4, а шаг линии равен 0x140 / 4 = 0x50. Байтовый адрес из даунстрима указан
++ * в комментарии к каждой строке, чтобы сверка была механической.
++ *
++ * Блок COMN занимает 0x000..0x0BF, TRSV линии 0 начинается с 0x0C0, линии 1
++ * с 0x200 — отсюда сходятся вендорские подписи вида "TRSVx_14(0x110/0x250)".
++ */
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++
++#include "phy-samsung-ufs.h"
++
++/*
++ * Регистр изоляции PHY в PMU. У Exynos7420 это 0x0720, у нас 0x0724 —
++ * подтверждено даунстримом дважды: литералом 0x16480724 в подузле
++ * ufs-phy-sys узла ufs, и местом записи exynos_ufs_ctrl_phy_pwr(), где в
++ * этот регистр пишется просто 1, чтобы снять изоляцию.
++ */
++#define EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL	0x0724
++#define EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL_MASK	0x1
++#define EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL_EN	BIT(0)
++
++/* шаг между линиями TRSV: 0x140 байт = 0x50 регистров */
++#define PHY_EXYNOS8895_LANE_OFFSET		0x50
++
++/* монитор захвата CDR, байтовое смещение 0x1FC у линии 0 */
++#define EXYNOS8895_PHY_CDR_LOCK_STATUS		0x7F
++#define EXYNOS8895_PHY_CDR_LOCK_DONE		BIT(0)
++
++/* пауза COMMON_WAIT из хвоста вендорской phy-init, мкс */
++#define EXYNOS8895_PHY_CAL_WAIT_US		200
++
++#define PHY_TRSV_REG_CFG_E8895(o, v, d)	\
++	PHY_TRSV_REG_CFG_OFFSET(o, v, d, PHY_EXYNOS8895_LANE_OFFSET)
++
++/*
++ * Калибровка перед стартом линка (вендорское свойство phy-init, часть
++ * PHY_PMA_*). Обрамление 0x8C: 0x80 -> настройка -> 0xC0 -> 0x00 — это
++ * вендорская последовательность применения, её порядок значим.
++ */
++static const struct samsung_ufs_phy_cfg exynos8895_pre_init_cfg[] = {
++	PHY_COMN_REG_CFG(0x023, 0x80, PWR_MODE_ANY),	/* 0x08C */
++	/* CMN_REG1D: источник PWM-такта, 0x10 = refclk (0x20 = внутренний OSC) */
++	PHY_COMN_REG_CFG(0x01d, 0x10, PWR_MODE_ANY),	/* 0x074 */
++	PHY_TRSV_REG_CFG_E8895(0x044, 0xb5, PWR_MODE_ANY),	/* 0x110 */
++	PHY_TRSV_REG_CFG_E8895(0x04d, 0x43, PWR_MODE_ANY),	/* 0x134 */
++	PHY_TRSV_REG_CFG_E8895(0x05b, 0x20, PWR_MODE_ANY),	/* 0x16C */
++	PHY_TRSV_REG_CFG_E8895(0x05e, 0xc0, PWR_MODE_ANY),	/* 0x178 */
++	PHY_TRSV_REG_CFG_E8895(0x038, 0x12, PWR_MODE_ANY),	/* 0x0E0 */
++	PHY_TRSV_REG_CFG_E8895(0x059, 0x58, PWR_MODE_ANY),	/* 0x164 */
++	PHY_COMN_REG_CFG(0x023, 0xc0, PWR_MODE_ANY),	/* 0x08C */
++	PHY_COMN_REG_CFG(0x023, 0x00, PWR_MODE_ANY),	/* 0x08C */
++	END_UFS_PHY_CFG,
++};
++
++/*
++ * Калибровка под HS (вендорское calib-of-hs-rate-b, часть PHY_PMA_TRSV).
++ *
++ * У даунстрима записи 0x128/0x12C/0x134 расписаны отдельно для G1/G2/G3, а
++ * в mainline поле .desc сейчас не фильтруется вовсе (samsung_ufs_phy_calibrate
++ * применяет таблицу целиком), поэтому оставлены только значения для G3 —
++ * именно эту передачу и просит dts даунстрима (pmd-attr-gear = 3,
++ * hs-series = HS_rate_b). Если понадобится G1/G2, фильтрацию по .desc
++ * придётся сначала вернуть в phy-samsung-ufs.c.
++ *
++ * Таблицы rate-a и rate-b в даунстриме побайтово совпадают, так что эта
++ * годится для обеих серий.
++ */
++static const struct samsung_ufs_phy_cfg exynos8895_pre_pwr_hs_cfg[] = {
++	PHY_TRSV_REG_CFG_E8895(0x032, 0xbc, PWR_MODE_HS_ANY),	/* 0x0C8 */
++	/* TX_SLEW_PREEMP_EN_CTRL_EN = 1 */
++	PHY_TRSV_REG_CFG_E8895(0x03c, 0x7f, PWR_MODE_HS_ANY),	/* 0x0F0 */
++	/* TX_AMPL_CNTR_EN = 1 */
++	PHY_TRSV_REG_CFG_E8895(0x048, 0xc0, PWR_MODE_HS_ANY),	/* 0x120 */
++	/* TX_AMPL_CTRL = 0 (G3A/B) */
++	PHY_TRSV_REG_CFG_E8895(0x04a, 0x00, PWR_MODE_HS_G3_ANY),	/* 0x128 */
++	/* TX_PREEMP_CTRL = 0 dB */
++	PHY_TRSV_REG_CFG_E8895(0x04b, 0x00, PWR_MODE_HS_ANY),	/* 0x12C */
++	/* TX_AUX_CAP_CTRL = 3b'110 (G3A/B) */
++	PHY_TRSV_REG_CFG_E8895(0x04d, 0x63, PWR_MODE_HS_G3_ANY),	/* 0x134 */
++	PHY_TRSV_REG_CFG_E8895(0x042, 0x5d, PWR_MODE_HS_ANY),	/* 0x108 */
++	PHY_TRSV_REG_CFG_E8895(0x043, 0x90, PWR_MODE_HS_ANY),	/* 0x10C */
++	END_UFS_PHY_CFG,
++};
++
++static const struct samsung_ufs_phy_cfg *exynos8895_ufs_phy_cfgs[CFG_TAG_MAX] = {
++	[CFG_PRE_INIT]		= exynos8895_pre_init_cfg,
++	[CFG_PRE_PWR_HS]	= exynos8895_pre_pwr_hs_cfg,
++};
++
++/*
++ * Один такт, а не четыре. У Exynos7420 PHY получает tx0/rx0/rx1_symbol_clk
++ * отдельными гейтами; у Exynos8895 таких гейтов в даунстриме нет вообще —
++ * узлу ufs отданы всего два клока (aclk и unipro), а PHY тактируется от
++ * опорного через мультиплексор внутри HCI (HCI_MPHY_REFCLK_SEL). Все SoC
++ * Samsung новее 7420 (autov9, autov920, gs101) объявляют ровно один ref_clk.
++ */
++static const char * const exynos8895_ufs_phy_clks[] = {
++	"ref_clk",
++};
++
++/*
++ * Хвост вендорской phy-init: <0x00 0xC8 PMD_ALL COMMON_WAIT>, то есть
++ * udelay(200) сразу после таблицы. Отдельного типа "подождать" в mainline
++ * нет, зато есть ровно подходящий по месту вызова хук wait_for_cal — он
++ * дёргается сразу после применения CFG_PRE_INIT.
++ */
++static int exynos8895_phy_wait_for_calibration(struct phy *phy, u8 lane)
++{
++	udelay(EXYNOS8895_PHY_CAL_WAIT_US);
++
++	return 0;
++}
++
++/*
++ * Вендорское post-calib-of-hs-rate-b: <0x1fc 0x01 PMD_HS PHY_CDR_WAIT>.
++ * Даунстрим ждёт до 100 мс, опрашивая бит 0 регистра TRSV по байтовому
++ * смещению 0x1FC (линия 0) / 0x33C (линия 1).
++ *
++ * Штатный samsung_ufs_phy_wait_for_lock_acq здесь не годится: он проверяет
++ * ещё и PLL lock по общему для exynos7 адресу, которого у нас нет.
++ */
++static int exynos8895_phy_wait_for_cdr_lock(struct phy *phy, u8 lane)
++{
++	struct samsung_ufs_phy *ufs_phy = get_samsung_ufs_phy(phy);
++	const unsigned int timeout_us = 100000;
++	const unsigned int sleep_us = 10;
++	u32 off;
++	u32 val;
++	int err;
++
++	off = PHY_APB_ADDR(EXYNOS8895_PHY_CDR_LOCK_STATUS +
++			   lane * PHY_EXYNOS8895_LANE_OFFSET);
++
++	err = readl_poll_timeout(ufs_phy->reg_pma + off, val,
++				 (val & EXYNOS8895_PHY_CDR_LOCK_DONE),
++				 sleep_us, timeout_us);
++	if (err)
++		dev_err(ufs_phy->dev, "failed to get cdr lock %d\n", err);
++
++	return err;
++}
++
++const struct samsung_ufs_phy_drvdata exynos8895_ufs_phy = {
++	.cfgs = exynos8895_ufs_phy_cfgs,
++	.isol = {
++		.offset = EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL,
++		.mask = EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL_MASK,
++		.en = EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL_EN,
++	},
++	.clk_list = exynos8895_ufs_phy_clks,
++	.num_clks = ARRAY_SIZE(exynos8895_ufs_phy_clks),
++	.wait_for_cal = exynos8895_phy_wait_for_calibration,
++	.wait_for_cdr = exynos8895_phy_wait_for_cdr_lock,
++};
 diff --git a/drivers/phy/samsung/phy-samsung-ufs.c b/drivers/phy/samsung/phy-samsung-ufs.c
-index ee665f26c..8779c389e 100644
+index ee665f26c..47e4ff218 100644
 --- a/drivers/phy/samsung/phy-samsung-ufs.c
 +++ b/drivers/phy/samsung/phy-samsung-ufs.c
 @@ -21,6 +21,24 @@
@@ -535,6 +747,28 @@ index ee665f26c..8779c389e 100644
  	phy_provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
  	if (IS_ERR(phy_provider)) {
  		err = PTR_ERR(phy_provider);
+@@ -360,6 +388,9 @@ static const struct of_device_id samsung_ufs_phy_match[] = {
+ 	}, {
+ 		.compatible = "samsung,exynos7-ufs-phy",
+ 		.data = &exynos7_ufs_phy,
++	}, {
++		.compatible = "samsung,exynos8895-ufs-phy",
++		.data = &exynos8895_ufs_phy,
+ 	}, {
+ 		.compatible = "samsung,exynosautov9-ufs-phy",
+ 		.data = &exynosautov9_ufs_phy,
+diff --git a/drivers/phy/samsung/phy-samsung-ufs.h b/drivers/phy/samsung/phy-samsung-ufs.h
+index f2c2e744e..89465f5b4 100644
+--- a/drivers/phy/samsung/phy-samsung-ufs.h
++++ b/drivers/phy/samsung/phy-samsung-ufs.h
+@@ -155,6 +155,7 @@ void samsung_ufs_phy_config(struct samsung_ufs_phy *phy,
+ 			    const struct samsung_ufs_phy_cfg *cfg, u8 lane);
+ 
+ extern const struct samsung_ufs_phy_drvdata exynos7_ufs_phy;
++extern const struct samsung_ufs_phy_drvdata exynos8895_ufs_phy;
+ extern const struct samsung_ufs_phy_drvdata exynosautov9_ufs_phy;
+ extern const struct samsung_ufs_phy_drvdata exynosautov920_ufs_phy;
+ extern const struct samsung_ufs_phy_drvdata fsd_ufs_phy;
 diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
 index 13e6357a8..c87eb803b 100644
 --- a/drivers/ufs/core/ufshcd.c
@@ -634,7 +868,7 @@ index 13e6357a8..c87eb803b 100644
  	err = ufshcd_hba_capabilities(hba);
  	if (err)
 diff --git a/drivers/ufs/host/ufs-exynos.c b/drivers/ufs/host/ufs-exynos.c
-index b2f65c465..8af2f1789 100644
+index b2f65c465..22492be9e 100644
 --- a/drivers/ufs/host/ufs-exynos.c
 +++ b/drivers/ufs/host/ufs-exynos.c
 @@ -28,6 +28,24 @@
@@ -662,7 +896,25 @@ index b2f65c465..8af2f1789 100644
  #define DATA_UNIT_SIZE		4096
  
  /*
-@@ -848,17 +866,26 @@ static void exynos_ufs_config_smu(struct exynos_ufs *ufs)
+@@ -77,8 +95,17 @@
+ 				 UNIPRO_PCLK_CTRL_EN |\
+ 				 UNIPRO_MCLK_CTRL_EN)
+ 
++/*
++ * Появились начиная с Exynos8895, у Exynos7420 этого блока нет вовсе.
++ * HCI_UFS_ACG_DISABLE выключает аппаратное автогашение тактов на время
++ * инициализации, HCI_MPHY_REFCLK_SEL выбирает путь опорного такта M-PHY.
++ */
++#define HCI_UFS_ACG_DISABLE	0xFC
++#define HCI_UFS_ACG_DISABLE_EN	BIT(0)
+ #define HCI_IOP_ACG_DISABLE	0x100
+ #define HCI_IOP_ACG_DISABLE_EN	BIT(0)
++#define HCI_MPHY_REFCLK_SEL	0x108
++#define MPHY_REFCLK_SEL		BIT(0)
+ 
+ /* Device fatal error */
+ #define DFES_ERR_EN		BIT(31)
+@@ -848,17 +875,26 @@ static void exynos_ufs_config_smu(struct exynos_ufs *ufs)
  	if (ufs->opts & EXYNOS_UFS_OPT_UFSPR_SECURE)
  		return;
  
@@ -689,7 +941,7 @@ index b2f65c465..8af2f1789 100644
  }
  
  static void exynos_ufs_config_sync_pattern_mask(struct exynos_ufs *ufs,
-@@ -1026,6 +1053,7 @@ static void exynos_ufs_specify_nexus_t_tm_req(struct ufs_hba *hba,
+@@ -1026,6 +1062,7 @@ static void exynos_ufs_specify_nexus_t_tm_req(struct ufs_hba *hba,
  
  static int exynos_ufs_phy_init(struct exynos_ufs *ufs)
  {
@@ -697,7 +949,7 @@ index b2f65c465..8af2f1789 100644
  	struct ufs_hba *hba = ufs->hba;
  	struct phy *generic_phy = ufs->phy;
  	int ret = 0;
-@@ -1131,6 +1159,7 @@ static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
+@@ -1131,6 +1168,7 @@ static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
  
  static int exynos_ufs_pre_link(struct ufs_hba *hba)
  {
@@ -705,7 +957,7 @@ index b2f65c465..8af2f1789 100644
  	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
  
  	/* hci */
-@@ -1174,6 +1203,7 @@ static void exynos_ufs_fit_aggr_timeout(struct exynos_ufs *ufs)
+@@ -1174,6 +1212,7 @@ static void exynos_ufs_fit_aggr_timeout(struct exynos_ufs *ufs)
  
  static int exynos_ufs_post_link(struct ufs_hba *hba)
  {
@@ -713,7 +965,28 @@ index b2f65c465..8af2f1789 100644
  	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
  	struct phy *generic_phy = ufs->phy;
  	struct exynos_ufs_uic_attr *attr = ufs->drv_data->uic_attr;
-@@ -1532,6 +1562,7 @@ static void exynos_ufs_fmp_resume(struct ufs_hba *hba)
+@@ -1282,6 +1321,20 @@ static int exynos_ufs_parse_dt(struct device *dev, struct exynos_ufs *ufs)
+ 	ufs->pclk_avail_min = PCLK_AVAIL_MIN;
+ 	ufs->pclk_avail_max = PCLK_AVAIL_MAX;
+ 
++	/*
++	 * Допустимый диапазон APB-клока UniPro. По нему
++	 * exynos_ufs_get_clk_info() подбирает делитель, то есть свойство
++	 * задаёт не проверку, а саму рабочую частоту PCS. У Exynos8895
++	 * границы (70..166 МГц) специально выбраны так, чтобы 166.5625 МГц
++	 * поделились ровно один раз — см. dts. Свойство описано в
++	 * биндинге и используется даунстримом Samsung; если его нет,
++	 * остаются прежние умолчания.
++	 */
++	if (!of_property_read_u32_index(np, "pclk-freq-avail-range", 0,
++					&ufs->pclk_avail_min))
++		of_property_read_u32_index(np, "pclk-freq-avail-range", 1,
++					   &ufs->pclk_avail_max);
++
+ 	attr->rx_adv_fine_gran_sup_en = RX_ADV_FINE_GRAN_SUP_EN;
+ 	attr->rx_adv_fine_gran_step = RX_ADV_FINE_GRAN_STEP_VAL;
+ 	attr->rx_adv_min_actv_time_cap = RX_ADV_MIN_ACTV_TIME_CAP;
+@@ -1532,6 +1585,7 @@ static void exynos_ufs_fmp_resume(struct ufs_hba *hba)
  
  static int exynos_ufs_init(struct ufs_hba *hba)
  {
@@ -721,7 +994,7 @@ index b2f65c465..8af2f1789 100644
  	struct device *dev = hba->dev;
  	struct platform_device *pdev = to_platform_device(dev);
  	struct exynos_ufs *ufs;
-@@ -1548,6 +1579,8 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+@@ -1548,6 +1602,8 @@ static int exynos_ufs_init(struct ufs_hba *hba)
  		return PTR_ERR(ufs->reg_hci);
  	}
  
@@ -730,7 +1003,7 @@ index b2f65c465..8af2f1789 100644
  	/* unipro */
  	ufs->reg_unipro = devm_platform_ioremap_resource_byname(pdev, "unipro");
  	if (IS_ERR(ufs->reg_unipro)) {
-@@ -1555,6 +1588,8 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+@@ -1555,6 +1611,8 @@ static int exynos_ufs_init(struct ufs_hba *hba)
  		return PTR_ERR(ufs->reg_unipro);
  	}
  
@@ -739,7 +1012,7 @@ index b2f65c465..8af2f1789 100644
  	/* ufs protector */
  	ufs->reg_ufsp = devm_platform_ioremap_resource_byname(pdev, "ufsp");
  	if (IS_ERR(ufs->reg_ufsp)) {
-@@ -1562,12 +1597,14 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+@@ -1562,12 +1620,14 @@ static int exynos_ufs_init(struct ufs_hba *hba)
  		return PTR_ERR(ufs->reg_ufsp);
  	}
  
@@ -754,7 +1027,7 @@ index b2f65c465..8af2f1789 100644
  	ufs->phy = devm_phy_get(dev, "ufs-phy");
  	if (IS_ERR(ufs->phy)) {
  		ret = PTR_ERR(ufs->phy);
-@@ -1575,8 +1612,10 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+@@ -1575,8 +1635,10 @@ static int exynos_ufs_init(struct ufs_hba *hba)
  		goto out;
  	}
  
@@ -765,7 +1038,7 @@ index b2f65c465..8af2f1789 100644
  	exynos_ufs_fmp_init(hba, ufs);
  
  	if (ufs->drv_data->drv_init) {
-@@ -1587,13 +1626,17 @@ static int exynos_ufs_init(struct ufs_hba *hba)
+@@ -1587,13 +1649,17 @@ static int exynos_ufs_init(struct ufs_hba *hba)
  		}
  	}
  
@@ -783,7 +1056,7 @@ index b2f65c465..8af2f1789 100644
  	hba->host->dma_alignment = DATA_UNIT_SIZE - 1;
  	return 0;
  
-@@ -1701,6 +1744,7 @@ static void exynos_ufs_post_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
+@@ -1701,6 +1767,7 @@ static void exynos_ufs_post_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
  static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
  					enum ufs_notify_change_status status)
  {
@@ -791,7 +1064,7 @@ index b2f65c465..8af2f1789 100644
  	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
  	int ret = 0;
  
-@@ -1742,6 +1786,7 @@ static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
+@@ -1742,6 +1809,7 @@ static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
  static int exynos_ufs_link_startup_notify(struct ufs_hba *hba,
  					  enum ufs_notify_change_status status)
  {
@@ -799,7 +1072,7 @@ index b2f65c465..8af2f1789 100644
  	int ret = 0;
  
  	switch (status) {
-@@ -2126,6 +2171,7 @@ static struct ufs_hba_variant_ops ufs_hba_exynosauto_vh_ops = {
+@@ -2126,6 +2194,7 @@ static struct ufs_hba_variant_ops ufs_hba_exynosauto_vh_ops = {
  
  static int exynos_ufs_probe(struct platform_device *pdev)
  {
@@ -807,7 +1080,7 @@ index b2f65c465..8af2f1789 100644
  	int err;
  	struct device *dev = &pdev->dev;
  	const struct ufs_hba_variant_ops *vops = &ufs_hba_exynos_ops;
-@@ -2258,6 +2304,136 @@ static struct exynos_ufs_uic_attr fsd_uic_attr = {
+@@ -2258,6 +2327,233 @@ static struct exynos_ufs_uic_attr fsd_uic_attr = {
  	.pa_dbg_opt_suite1_off		= PA_DBG_OPTION_SUITE,
  };
  
@@ -838,113 +1111,210 @@ index b2f65c465..8af2f1789 100644
 + * кодом 1 (INVALID_MIB_ATTRIBUTE), и следом отвергаются все тестовые
 + * атрибуты M-PHY, которые за ним идут.
 + *
-+ * Все SoC Samsung новее 7420 (autov9, autov920, gs101) открывают вендорский
-+ * доступ атрибутом 0x200 и программируют период тактов через VND_*.
-+ * Отсюда и берём образец — ближайший работающий родственник это gs101.
++ * Первая версия этой функции была срисована с gs101_ufs_pre_link и все
++ * записи прошли (ни одного ret=1), но DME_LINK_STARTUP всё равно не
++ * завершался. Теперь последовательность взята из вендорского ядра для
++ * universal8895, где она лежит в dts узла ufs — свойство phy-init, записи с
++ * типами UNIPRO_DBG_PRD, PHY_PCS_* и UNIPRO_*_MIB (записи PHY_PMA_* оттуда
++ * же уехали в phy-exynos8895-ufs.c). Отличий от gs101 три, и каждое важно:
 + *
-+ * Осознанно НЕ переносим из gs101 его точечную подстройку линий
-+ * (0x2f/0x84/0x25 на RX, 0x04/0x7F на TX) и ручную установку соединения
-+ * (N_DEVICEID, T_CONNECTIONSTATE): это значения под конкретный чип, а у нас
-+ * выставлен EXYNOS_UFS_OPT_SKIP_CONNECTION_ESTAB. Начинаем с того, без чего
-+ * M-PHY заведомо не поедет — период тактов и длительность line reset, оба
-+ * считаются от реальной mclk_rate.
++ *  - период такта PCS берётся от pclk, а не от mclk, и НЕ округляется вверх:
++ *    даунстрим считает его как NSEC_PER_SEC / pclk_rate. У нас pclk после
++ *    деления на 2 (см. pclk-freq-avail-range в dts) равен 83.28 МГц, то есть
++ *    12 нс, тогда как формула gs101 дала бы 7;
++ *  - line reset здесь вообще не программируется — вендор его не трогает;
++ *  - зато есть восемь точечных настроек PCS, которых у gs101 нет (и его
++ *    собственные 0x2f/0x25 сюда, наоборот, не годятся).
 + */
 +static int exynos8895_ufs_pre_link(struct exynos_ufs *ufs)
 +{
 +	struct ufs_hba *hba = ufs->hba;
-+	u32 tx_line_reset_period, rx_line_reset_period;
++	u32 pcs_clk_period = UNIPRO_PCLK_PERIOD(ufs);
++	u32 val;
 +	int i;
 +
-+	UFSMARK("8895 pre_link: mclk=%lu", ufs->mclk_rate);
++	UFSMARK("8895 pre_link: mclk=%lu pclk=%u prd=%u",
++		ufs->mclk_rate, ufs->pclk_rate, pcs_clk_period);
 +
-+	rx_line_reset_period = (RX_LINE_RESET_TIME * ufs->mclk_rate) /
-+			       NSEC_PER_MSEC;
-+	tx_line_reset_period = (TX_LINE_RESET_TIME * ufs->mclk_rate) /
-+			       NSEC_PER_MSEC;
++	/*
++	 * HWACG у 8895 после сброса разрешён, и по прямому указанию
++	 * даунстрима ("need to set 1 (disable HWACG) during UFS init") его
++	 * надо выключить на время инициализации: иначе автоматика гасит
++	 * тактирование блока прямо посреди настройки.
++	 */
++	val = hci_readl(ufs, HCI_UFS_ACG_DISABLE);
++	hci_writel(ufs, val | HCI_UFS_ACG_DISABLE_EN, HCI_UFS_ACG_DISABLE);
 +
-+	unipro_writel(ufs, get_mclk_period_unipro_18(ufs), COMP_CLK_PERIOD);
++	/*
++	 * Мультиплексор опорного такта M-PHY: даунстрим выбирает
++	 * альтернативный путь (exynos_ufs_select_refclk(ufs, true), ветка
++	 * ровно для hw_rev == UFS_VER_0004, то есть для 8895). Без опорного
++	 * такта PLL передатчика не захватится, и DME_LINK_STARTUP не
++	 * завершится никогда — что мы и наблюдали.
++	 */
++	val = hci_readl(ufs, HCI_MPHY_REFCLK_SEL);
++	hci_writel(ufs, val | MPHY_REFCLK_SEL, HCI_MPHY_REFCLK_SEL);
++
++	/*
++	 * Период такта UniPro. Считается от mclk и, в отличие от общей
++	 * exynos_ufs_config_unipro(), без округления вверх: при 166.5625 МГц
++	 * даунстрим пишет 6, а DIV_ROUND_UP дал бы 7. Поэтому в
++	 * exynos8895_uic_attr поле pa_dbg_clk_period_off оставлено нулём —
++	 * общая функция этот атрибут не трогает, и он пишется здесь.
++	 */
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_DBG_CLK_PERIOD),
++		       NSEC_PER_SEC / ufs->mclk_rate);
 +
 +	/* открыть доступ к вендорским атрибутам M-PHY */
 +	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x40);
 +
 +	for_each_ufs_rx_lane(ufs, i) {
 +		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_CLK_PRD, i),
-+			       DIV_ROUND_UP(NSEC_PER_SEC, ufs->mclk_rate));
-+		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_CLK_PRD_EN, i), 0x0);
-+		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_LINERESET_VALUE2, i),
-+			       (rx_line_reset_period >> 16) & 0xFF);
-+		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_LINERESET_VALUE1, i),
-+			       (rx_line_reset_period >> 8) & 0xFF);
-+		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_LINERESET_VALUE0, i),
-+			       (rx_line_reset_period) & 0xFF);
++			       pcs_clk_period);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x5c, i), 0x38);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x0f, i), 0x00);
++		/* INT_H8_COUNT_CAP_ENABLE: THIBERN8 CAPABILITY (200 us) */
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x65, i), 0x01);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x69, i), 0x01);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x21, i), 0x00);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x22, i), 0x00);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x84, i), 0x01);
 +	}
 +
 +	for_each_ufs_tx_lane(ufs, i) {
 +		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_TX_CLK_PRD, i),
-+			       DIV_ROUND_UP(NSEC_PER_SEC, ufs->mclk_rate));
-+		/* чтобы VND_TX_LINERESET_PVALUE не влиял на VND_TX_CLK_PRD */
-+		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_TX_CLK_PRD_EN, i), 0x02);
-+		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_TX_LINERESET_PVALUE2, i),
-+			       (tx_line_reset_period >> 16) & 0xFF);
-+		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_TX_LINERESET_PVALUE1, i),
-+			       (tx_line_reset_period >> 8) & 0xFF);
-+		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_TX_LINERESET_PVALUE0, i),
-+			       (tx_line_reset_period) & 0xFF);
++			       pcs_clk_period);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x04, i), 0x01);
 +	}
 +
 +	/* закрыть вендорский доступ */
 +	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x0);
 +
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_DBG_AUTOMODE_THLD), 0x4e20);
 +	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_LOCAL_TX_LCC_ENABLE), 0x0);
++
++	/*
++	 * Установка соединения. У даунстрима exynos_ufs_establish_connt()
++	 * для hw_rev >= UFS_VER_0004 выходит сразу, а эти четыре атрибута
++	 * пишутся здесь, до старта линка — как и у gs101.
++	 */
++	ufshcd_dme_set(hba, UIC_ARG_MIB(N_DEVICEID), 0x0);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(N_DEVICEID_VALID), 0x1);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(T_PEERDEVICEID), 0x1);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(T_CONNECTIONSTATE), CPORT_CONNECTED);
 +
 +	UFSMARK("8895 pre_link готов");
 +	return 0;
 +}
 +
++/*
++ * После старта линка: вендорское свойство post-phy-init.
++ */
++static int exynos8895_ufs_post_link(struct exynos_ufs *ufs)
++{
++	struct ufs_hba *hba = ufs->hba;
++	int i;
++
++	UFSMARK("8895 post_link enter");
++
++	exynos_ufs_enable_dbg_mode(hba);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_SAVECONFIGTIME), 0xfa);
++	exynos_ufs_disable_dbg_mode(hba);
++
++	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x40);
++	for_each_ufs_rx_lane(ufs, i) {
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x35, i), 0x05);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x73, i), 0x01);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x41, i), 0x02);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x42, i), 0xac);
++	}
++	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x0);
++
++	UFSMARK("8895 post_link готов");
++	return 0;
++}
++
++/*
++ * L2-таймеры под смену режима питания. Значения из dts даунстрима
++ * (ufs,pmd-local-l2-timer / ufs,pmd-remote-l2-timer) и из свойства
++ * calib-of-hs-rate-b, записи UNIPRO_STD_MIB и UNIPRO_DBG_APB. Совпадают с
++ * gs101 один в один — общая часть нового поколения UniPro Samsung.
++ */
++static int exynos8895_ufs_pre_pwr_change(struct exynos_ufs *ufs,
++					 struct ufs_pa_layer_attr *pwr)
++{
++	struct ufs_hba *hba = ufs->hba;
++
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_PWRMODEUSERDATA0), 12000);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_PWRMODEUSERDATA1), 32000);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_PWRMODEUSERDATA2), 16000);
++	unipro_writel(ufs, 8064, UNIPRO_DME_POWERMODE_REQ_LOCALL2TIMER0);
++	unipro_writel(ufs, 28224, UNIPRO_DME_POWERMODE_REQ_LOCALL2TIMER1);
++	unipro_writel(ufs, 20160, UNIPRO_DME_POWERMODE_REQ_LOCALL2TIMER2);
++	unipro_writel(ufs, 12000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER0);
++	unipro_writel(ufs, 32000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER1);
++	unipro_writel(ufs, 16000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER2);
++
++	return 0;
++}
++
++/*
++ * Атрибуты M-PHY (tx_dif_*, rx_*_nsec и прочие тайминги) здесь намеренно не
++ * заданы: с EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR они не используются, а у
++ * даунстрима обе функции, которые их пишут, для hw_rev >= UFS_VER_0004
++ * выходят сразу же.
++ *
++ * pa_dbg_clk_period_off оставлен нулём осознанно — см. комментарий в
++ * exynos8895_ufs_pre_link() про округление периода такта.
++ */
++static struct exynos_ufs_uic_attr exynos8895_uic_attr = {
++	.tx_trailingclks		= 0x10,
++	.pa_dbg_opt_suite1_val		= 0x2e820183,
++	.pa_dbg_opt_suite1_off		= PA_DBG_OPTION_SUITE,
++};
++
 +static const struct exynos_ufs_drv_data exynos8895_ufs_drvs = {
-+	.uic_attr		= &exynos7_uic_attr,
++	.uic_attr		= &exynos8895_uic_attr,
++	/*
++	 * Набор как у gs101. Существенно отсутствие UFSHCI_QUIRK_BROKEN_HCE:
++	 * даунстрим включает обход HCE (UFSHCD_QUIRK_USE_OF_HCE) только для
++	 * hw_rev == UFS_VER_0003, то есть для Exynos8890. У 8895 контроллер
++	 * поднимается штатной записью HCE, а не парой DME_RESET/DME_ENABLE.
++	 */
 +	.quirks			= UFSHCD_QUIRK_PRDT_BYTE_GRAN |
 +				  UFSHCI_QUIRK_BROKEN_REQ_LIST_CLR |
-+				  UFSHCI_QUIRK_BROKEN_HCE |
 +				  UFSHCI_QUIRK_SKIP_RESET_INTR_AGGR |
 +				  UFSHCD_QUIRK_BROKEN_OCS_FATAL_ERROR |
 +				  UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL |
 +				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING,
++	/*
++	 * EXYNOS_UFS_OPT_BROKEN_RX_SEL_IDX убран, и это не косметика: с ним
++	 * rx_sel_idx = 0, то есть все атрибуты PCS RX уходили с селектором
++	 * линии 0..1 — в передатчик. У даунстрима RX_LANE_0 = 4, ровно как в
++	 * mainline по умолчанию (PA_MAXDATALANES).
++	 *
++	 * EXYNOS_UFS_OPT_HAS_APB_CLK_CTRL нужен, чтобы заработал делитель
++	 * pclk: без него частота PCS считается вдвое выше настоящей (см.
++	 * pclk-freq-avail-range в dts).
++	 *
++	 * EXYNOS_UFS_OPT_TIMER_TICK_SELECT — то же, что IA_TICK_SEL в
++	 * exynos_ufs_fit_aggr_timeout() даунстрима для hw_rev >= 0004.
++	 */
 +	.opts			= EXYNOS_UFS_OPT_HAS_APB_CLK_CTRL |
 +				  EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL |
-+				  EXYNOS_UFS_OPT_BROKEN_RX_SEL_IDX |
 +				  EXYNOS_UFS_OPT_SKIP_CONNECTION_ESTAB |
-+				  EXYNOS_UFS_OPT_USE_SW_HIBERN8_TIMER |
 +				  EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR |
++				  EXYNOS_UFS_OPT_TIMER_TICK_SELECT |
 +				  EXYNOS_UFS_OPT_UFSPR_SECURE,
-+	/*
-+	 * Ни pre_link, ни post_link от exynos7 здесь не годятся, и это
-+	 * измерено, а не предположено. Все их записи отвергаются UniPro с
-+	 * кодом 1 (INVALID_MIB_ATTRIBUTE):
-+	 *
-+	 *   dme-set: attr-id 0x9540 val 0x1 failed 0 retries (ret=1)
-+	 *
-+	 * 0x9540 — это PA_DBG_OV_TM, вендорский «режим отладочного
-+	 * доступа» Exynos7420. Им exynos_ufs_enable_ov_tm() открывает
-+	 * доступ к тестовым атрибутам M-PHY, и раз его нет, следом
-+	 * отвергаются и все они (0x316, 0x317, 0x340, 0x341, 0x352..0x355).
-+	 * У Exynos8895 схема другая: SoC новее 7420 открывают вендорский
-+	 * доступ через атрибут 0x200 (см. gs101_ufs_pre_link).
-+	 *
-+	 * Пока не написан свой pre_link, хуки не ставим вовсе. Это не
-+	 * поражение: S-Boot оставляет PHY уже настроенным (HCS = 0xf,
-+	 * UCRDY выставлен, PMA держит осмысленные значения), так что
-+	 * шансы поднять линк на умолчаниях вполне реальные.
-+	 */
 +	.pre_link		= exynos8895_ufs_pre_link,
-+	.pre_pwr_change		= exynos7_ufs_pre_pwr_change,
-+	.post_pwr_change	= exynos7_ufs_post_pwr_change,
++	.post_link		= exynos8895_ufs_post_link,
++	.pre_pwr_change		= exynos8895_ufs_pre_pwr_change,
 +};
 +
  static const struct exynos_ufs_drv_data fsd_ufs_drvs = {
  	.uic_attr               = &fsd_uic_attr,
  	.quirks                 = UFSHCD_QUIRK_PRDT_BYTE_GRAN |
-@@ -2314,6 +2490,8 @@ static const struct of_device_id exynos_ufs_of_match[] = {
+@@ -2314,6 +2610,8 @@ static const struct of_device_id exynos_ufs_of_match[] = {
  	  .data	      = &gs101_ufs_drvs },
  	{ .compatible = "samsung,exynos7-ufs",
  	  .data	      = &exynos_ufs_drvs },

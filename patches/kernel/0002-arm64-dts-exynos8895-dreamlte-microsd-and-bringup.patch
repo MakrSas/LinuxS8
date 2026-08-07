@@ -1,5 +1,5 @@
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
-index 305dc72f9..4f02a52e3 100644
+index 305dc72f9..e63f5b818 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
 +++ b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
 @@ -26,6 +26,18 @@ chosen {
@@ -44,7 +44,7 @@ index 305dc72f9..4f02a52e3 100644
  		};
  
  		cont_splash_mem: framebuffer@cc000000 {
-@@ -100,6 +121,73 @@ reg_placeholder: regulator-0 {
+@@ -100,6 +121,72 @@ reg_placeholder: regulator-0 {
  		compatible = "regulator-fixed";
  		regulator-name = "reg-placeholder";
  	};
@@ -97,16 +97,15 @@ index 305dc72f9..4f02a52e3 100644
 +	};
 +};
 +
-+/* 2026-08-07: first attempt (PMU isolation offset left at the exynos7-ufs-phy
-+ * driver default, 0x720) hung boot solid — phy-samsung-ufs probed but never
-+ * returned. Research (see docs/progress-log.md) found the real Exynos8895
-+ * PHY isolation register is 0x724, not 0x720 — the PHY was likely never
-+ * actually taken out of isolation, so link-startup polling spun forever.
-+ * Re-enabling with samsung,pmu-syscon offset corrected to 0x724 (set on the
-+ * ufs_phy node in exynos8895.dtsi) to test that theory. The 4x placeholder
-+ * &oscclk on the PHY clocks is still electrically wrong (see that node's own
-+ * comment) — expect this may still not fully work, but should behave
-+ * differently if the isolation theory is right.
++/*
++ * PHY isolation lives at PMU offset 0x724 on Exynos8895, not the 0x720 the
++ * exynos7-ufs-phy driver defaults to; the offset is overridden on the
++ * ufs_phy node in exynos8895.dtsi.
++ *
++ * 2026-08-08: that node no longer borrows Exynos7420's PHY template. It now
++ * uses samsung,exynos8895-ufs-phy with the PMA calibration table lifted from
++ * the vendor kernel (see drivers/phy/samsung/phy-exynos8895-ufs.c) and a
++ * single real ref_clk instead of four placeholder &oscclk entries.
 + */
 +&ufs_phy {
 +	status = "okay";
@@ -118,7 +117,7 @@ index 305dc72f9..4f02a52e3 100644
  };
  
  &hsi2c_23 {
-@@ -129,19 +217,56 @@ &mmc {
+@@ -129,19 +216,56 @@ &mmc {
  	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd2_cd>;
  	pinctrl-names = "default";
  
@@ -180,7 +179,7 @@ index 305dc72f9..4f02a52e3 100644
  
  	status = "okay";
  };
-@@ -194,3 +319,24 @@ &usi9 {
+@@ -194,3 +318,24 @@ &usi9 {
  	samsung,mode = <USI_MODE_I2C0_1>;
  	status = "okay";
  };
@@ -206,7 +205,7 @@ index 305dc72f9..4f02a52e3 100644
 +	samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
 +};
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
-index ff114cd6c..6609ee142 100644
+index ff114cd6c..a21e68814 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 +++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 @@ -1433,6 +1433,18 @@ mmc: mmc@11500000 {
@@ -228,7 +227,7 @@ index ff114cd6c..6609ee142 100644
  			fifo-depth = <64>;
  			interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH>;
  			#address-cells = <1>;
-@@ -1440,6 +1452,75 @@ mmc: mmc@11500000 {
+@@ -1440,6 +1452,96 @@ mmc: mmc@11500000 {
  			status = "disabled";
  		};
  
@@ -249,14 +248,21 @@ index ff114cd6c..6609ee142 100644
 +		 * this is the leading suspect why. See docs/progress-log.md.
 +		 */
 +		ufs_phy: phy@11124000 {
-+			compatible = "samsung,exynos7-ufs-phy";
++			compatible = "samsung,exynos8895-ufs-phy";
 +			reg = <0x11124000 0x800>;
 +			reg-names = "phy-pma";
 +			samsung,pmu-syscon = <&pmu_system_controller 0x724>;
 +			#phy-cells = <0>;
-+			clocks = <&oscclk>, <&oscclk>, <&oscclk>, <&oscclk>;
-+			clock-names = "ref_clk", "rx1_symbol_clk",
-+				      "rx0_symbol_clk", "tx0_symbol_clk";
++			/*
++			 * Один такт, а не четыре. Четырёхтактовая модель
++			 * (tx0/rx0/rx1_symbol_clk) — это Exynos7420; у 8895
++			 * таких гейтов нет вообще, PHY тактируется от
++			 * опорного через мультиплексор внутри HCI. Раньше
++			 * здесь стояли три фиктивных &oscclk только ради
++			 * того, чтобы devm_clk_bulk_get() не упал.
++			 */
++			clocks = <&oscclk>;
++			clock-names = "ref_clk";
 +			status = "disabled";
 +		};
 +
@@ -296,6 +302,20 @@ index ff114cd6c..6609ee142 100644
 +			 * exynosautov9, exynosautov920 и gs101.
 +			 */
 +			freq-table-hz = <0 0>, <0 0>;
++			/*
++			 * Взято дословно из dts даунстрима, и верхняя граница
++			 * тут не описка: core_clk равен 166.5625 МГц, то есть
++			 * чуть ВЫШЕ 166 МГц, поэтому цикл деления в
++			 * exynos_ufs_get_clk_info() срабатывает ровно один
++			 * раз и даёт pclk_rate = 83.28 МГц.
++			 *
++			 * Это и есть настоящая частота APB-клока UniPro:
++			 * период 12 нс, а не 6, и именно он программируется в
++			 * VND_RX_CLK_PRD / VND_TX_CLK_PRD. Со значениями по
++			 * умолчанию (70..267 МГц) деления бы не было и в PCS
++			 * уехал бы вдвое неверный период.
++			 */
++			pclk-freq-avail-range = <70000000 166000000>;
 +			phys = <&ufs_phy>;
 +			phy-names = "ufs-phy";
 +			status = "disabled";
