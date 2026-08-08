@@ -25,6 +25,16 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk, Pango  # noqa: E402
 
+# Обработчик "draw" получает cairo.Context, а превращать его в объект
+# Python умеет только пакет python3-gi-cairo. Без него страница кадров
+# молча не рисовала бы ничего, сыпля TypeError в журнал — лучше сказать
+# прямо. Остальные страницы от этого не зависят.
+try:
+    gi.require_foreign("cairo")
+    HAVE_CAIRO = True
+except Exception:  # noqa: BLE001
+    HAVE_CAIRO = False
+
 SHOTS = os.path.expanduser("~/Pictures/Screenshots")
 
 # Приложения, которые имеет смысл гонять. Слева подпись, справа команда.
@@ -74,6 +84,12 @@ SHELLS = [
     ("GNOME — привычный рабочий стол", "gnome"),
 ]
 
+FRAME_MODES = [
+    ("весь экран", "full"),
+    ("квадрат", "small"),
+    ("заливка", "fill"),
+]
+
 # 1440x2960 на 5.8 дюйма — это около 570 dpi, поэтому без масштаба
 # интерфейс нечитаемо мелкий. Логическая ширина при 3 равна 480 точкам,
 # при 4 — 360, что для phosh нижняя граница.
@@ -114,14 +130,28 @@ def big(widget, scale=1.4):
     return widget
 
 
+LOGDIR = os.path.expanduser("~/lab-logs")
+
+
 def run_detached(cmd, env_extra=None):
-    """Запуск без ожидания: пульт не должен блокироваться на приложении."""
+    """Запуск без ожидания: пульт не должен блокироваться на приложении.
+
+    Вывод пишется в ~/lab-logs/<имя>.log, а не в /dev/null. Раньше он
+    терялся, и любой отказ приложения приходилось выяснять походом в TWRP
+    за журналом — а это перезагрузка ради одной строчки.
+    """
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
     try:
+        os.makedirs(LOGDIR, exist_ok=True)
+        path = os.path.join(LOGDIR, os.path.basename(cmd[0]) + ".log")
+        log = open(path, "w")
+    except OSError:
+        log = subprocess.DEVNULL
+    try:
         subprocess.Popen(cmd, env=env, start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdout=log, stderr=subprocess.STDOUT)
         return None
     except Exception as exc:  # noqa: BLE001
         return str(exc)
@@ -142,11 +172,12 @@ class Lab(Gtk.Window):
         self.renderer = dict(RENDERERS[0][1])
         self.renderer_name = RENDERERS[0][0]
 
-        stack = Gtk.Stack()
+        stack = self.stack = Gtk.Stack()
         stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
         switcher = Gtk.StackSwitcher(stack=stack)
 
         stack.add_titled(self._apps_page(), "apps", "Приложения")
+        stack.add_titled(self._frames_page(), "frames", "Кадры")
         stack.add_titled(self._scale_page(), "scale", "Масштаб")
         stack.add_titled(self._shell_page(), "shell", "Оболочка")
         stack.add_titled(self._info_page(), "info", "Состояние")
@@ -226,6 +257,132 @@ class Lab(Gtk.Window):
             self.say(f"{label}: {env_str}")
 
     # ---- страница оболочки ------------------------------------------
+    # ---- страница кадров --------------------------------------------
+    #
+    # Наблюдение пользователя: крутилка при запуске приложения плавная
+    # всегда, а прокрутка списка нет. Разница между ними не в GPU и не в
+    # масштабе, а в площади перерисовки. Здесь она и меряется.
+    #
+    # Три режима отличаются ровно одним:
+    #
+    #   весь экран   большая площадь + много работы cairo
+    #   квадрат      маленькая площадь + столько же работы на точку
+    #   заливка      большая площадь + почти нулевая работа cairo
+    #
+    # Третий и есть развилка. Если заливка идёт быстро, а «весь экран»
+    # медленно — платим за отрисовку процессором. Если оба медленные —
+    # платим за доставку кадра, и тогда виноват путь вывода, а не cairo.
+    def _frames_page(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        hint = Gtk.Label()
+        hint.set_markup(
+            "<b>Где теряются кадры.</b> Крутилка плавная, прокрутка нет —\n"
+            "разница в площади перерисовки, а не в GPU.\n\n"
+            "«Заливка» — та же площадь, что и «весь экран», но работы для\n"
+            "процессора почти нет. Если она быстрая, а «весь экран» нет —\n"
+            "виновата отрисовка процессором. Если обе медленные — виноват\n"
+            "путь вывода кадра."
+        )
+        hint.set_xalign(0)
+        hint.set_line_wrap(True)
+        box.pack_start(big(hint, 1.0), False, False, 4)
+
+        if not HAVE_CAIRO:
+            miss = Gtk.Label()
+            miss.set_markup(
+                "\n<b>Измерять нечем.</b> Нет пакета <tt>python3-gi-cairo</tt>,\n"
+                "без него обработчик отрисовки не получает контекст cairo.\n"
+                "Поставь его и открой страницу заново."
+            )
+            miss.set_line_wrap(True)
+            box.pack_start(big(miss, 1.1), False, False, 8)
+            return box
+
+        self.fps_label = Gtk.Label(label="кадров/с: —")
+        self.fps_label.set_xalign(0)
+        box.pack_start(big(self.fps_label, 1.8), False, False, 4)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        first = None
+        for label, mode in FRAME_MODES:
+            btn = Gtk.RadioButton.new_with_label_from_widget(first, label)
+            if first is None:
+                first = btn
+            btn.connect("toggled", self._on_frame_mode, mode)
+            big(btn, 1.1)
+            row.pack_start(btn, True, True, 0)
+        box.pack_start(row, False, False, 0)
+
+        self.frame_mode = FRAME_MODES[0][1]
+        self._fps_n = 0
+        self._fps_t0 = 0
+        self._phase = 0.0
+
+        self.canvas = Gtk.DrawingArea()
+        self.canvas.connect("draw", self._draw_frame)
+        box.pack_start(self.canvas, True, True, 0)
+        self.canvas.add_tick_callback(self._tick)
+        return box
+
+    def _on_frame_mode(self, btn, mode):
+        if btn.get_active():
+            self.frame_mode = mode
+            self._fps_n = 0
+            self._fps_t0 = 0
+
+    def _tick(self, widget, clock):
+        now = clock.get_frame_time()          # микросекунды
+        if self._fps_t0 == 0:
+            self._fps_t0 = now
+        self._fps_n += 1
+        dt = now - self._fps_t0
+        if dt >= 1000000:
+            self.fps_label.set_text(
+                "кадров/с: %.1f   (%.1f мс на кадр)"
+                % (self._fps_n * 1e6 / dt, dt / 1000.0 / self._fps_n))
+            self._fps_n = 0
+            self._fps_t0 = now
+
+        self._phase += 0.05
+        if self.frame_mode == "small":
+            # Ровно как крутилка: трогаем крошечный кусок окна.
+            widget.queue_draw_area(20, 20, 120, 120)
+        else:
+            widget.queue_draw()
+        return GLib.SOURCE_CONTINUE
+
+    def _draw_frame(self, widget, cr):
+        import math
+        w = widget.get_allocated_width()
+        h = widget.get_allocated_height()
+
+        if self.frame_mode == "fill":
+            # Та же площадь, но для процессора работы почти нет.
+            cr.set_source_rgb(0.1, 0.2 + 0.2 * math.sin(self._phase), 0.35)
+            cr.paint()
+            return False
+
+        cr.set_source_rgb(0.08, 0.09, 0.12)
+        cr.paint()
+
+        if self.frame_mode == "small":
+            cx, cy, r = 80, 80, 50
+        else:
+            cx, cy, r = w / 2, h / 2, min(w, h) / 2.2
+
+        # Нагрузка намеренно похожа на настоящий интерфейс: полупрозрачные
+        # заливки со сглаживанием, а не один сплошной цвет.
+        for i in range(24):
+            a = self._phase + i * math.pi / 12
+            cr.set_source_rgba(0.4 + 0.5 * math.sin(a), 0.5, 0.9, 0.35)
+            cr.arc(cx + math.cos(a) * r * 0.5,
+                   cy + math.sin(a) * r * 0.5, r * 0.35, 0, 2 * math.pi)
+            cr.fill()
+        return False
+
     # ---- страница масштаба ------------------------------------------
     def _scale_page(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
