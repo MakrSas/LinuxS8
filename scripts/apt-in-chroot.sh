@@ -34,13 +34,36 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ADB="$ROOT/build/tools/platform-tools/adb"
 TINYPROXY="$ROOT/build/tools/tinyproxy/usr/bin/tinyproxy"
-TP_CONF=/tmp/tinyproxy-run/tinyproxy.conf
+# Конфиг держим в дереве проекта, а не в /tmp: там он не переживает
+# перезагрузку хоста, и скрипт молча падал на "Could not open config file".
+TP_CONF="$ROOT/build/tools/tinyproxy/tinyproxy.conf"
+TP_RUN=/tmp/tinyproxy-run
 ROOT_MNT=/mnt/linuxroot
 PORT=8899
 
 if ! "$ADB" get-state 2>/dev/null | grep -q recovery; then
 	echo "Телефон должен быть в TWRP (adb get-state = recovery)." >&2
 	exit 1
+fi
+
+mkdir -p "$TP_RUN"
+if [ ! -f "$TP_CONF" ]; then
+	echo ">> создаю конфиг tinyproxy"
+	cat > "$TP_CONF" <<-EOF
+	User $(id -un)
+	Port $PORT
+	Listen 127.0.0.1
+	Timeout 600
+	Allow 127.0.0.1
+	LogFile "$TP_RUN/tinyproxy.log"
+	PidFile "$TP_RUN/tinyproxy.pid"
+	MaxClients 20
+	StartServers 2
+
+	# Прямого выхода в сеть у хоста нет — весь трафик идёт через прокси
+	# пользователя. Без этой строки tinyproxy отдаёт HTTP 500.
+	Upstream http 127.0.0.1:10809
+	EOF
 fi
 
 if ! pgrep -f "tinyproxy -c $TP_CONF" >/dev/null 2>&1; then
