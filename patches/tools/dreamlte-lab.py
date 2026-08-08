@@ -52,11 +52,31 @@ SHELLS = [
 ]
 
 
+def _find_label(widget):
+    """Ищет метку внутри виджета, включая вложенные контейнеры."""
+    if isinstance(widget, Gtk.Label):
+        return widget
+    if isinstance(widget, Gtk.Container):
+        for child in widget.get_children():
+            found = _find_label(child)
+            if found is not None:
+                return found
+    return None
+
+
 def big(widget, scale=1.4):
-    """Крупный шрифт: экран 1440x2960 на 5.8 дюйма, иначе не попасть пальцем."""
-    attrs = Pango.AttrList()
-    attrs.insert(Pango.attr_scale_new(scale))
-    widget.set_attributes(attrs)
+    """Крупный шрифт: экран 1440x2960 на 5.8 дюйма, иначе не попасть пальцем.
+
+    Масштаб задаётся атрибутами Pango, а set_attributes есть только у
+    Gtk.Label. Кнопки, радиокнопки и переключатель страниц метку прячут
+    внутри, поэтому её надо найти. Первая версия звала set_attributes
+    прямо на них — и пульт падал с AttributeError, не успев показаться.
+    """
+    label = _find_label(widget)
+    if label is not None:
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_scale_new(scale))
+        label.set_attributes(attrs)
     return widget
 
 
@@ -90,7 +110,6 @@ class Lab(Gtk.Window):
         stack = Gtk.Stack()
         stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
         switcher = Gtk.StackSwitcher(stack=stack)
-        big(switcher.get_children()[0] if switcher.get_children() else switcher)
 
         stack.add_titled(self._apps_page(), "apps", "Приложения")
         stack.add_titled(self._shell_page(), "shell", "Оболочка")
@@ -295,7 +314,25 @@ class Lab(Gtk.Window):
         self.say(err or f"снимок: {os.path.basename(name)}")
 
 
+def main():
+    """Запуск с записью падения в файл.
+
+    Без этого пульт, упавший при старте, выглядит как «не запускается», и
+    причину видно только из журнала — а до журнала на этом устройстве
+    добираться через TWRP. Пусть лучше сам расскажет.
+    """
+    log = os.path.expanduser("~/dreamlte-lab-error.log")
+    try:
+        win = Lab()
+        win.show_all()
+        Gtk.main()
+    except Exception:  # noqa: BLE001
+        import traceback
+        with open(log, "w") as fh:
+            traceback.print_exc(file=fh)
+        traceback.print_exc()
+        raise
+
+
 if __name__ == "__main__":
-    win = Lab()
-    win.show_all()
-    Gtk.main()
+    main()
