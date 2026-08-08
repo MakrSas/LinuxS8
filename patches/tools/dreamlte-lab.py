@@ -98,6 +98,18 @@ FRAME_MODES = [
 # 1440x2960 на 5.8 дюйма — это около 570 dpi, поэтому без масштаба
 # интерфейс нечитаемо мелкий. Логическая ширина при 3 равна 480 точкам,
 # при 4 — 360, что для phosh нижняя граница.
+# Узкое место оболочки — загрузка кадра клиента в текстуру GPU. Буфер
+# GTK3 лежит построчно, текстуры Mali уложены тайлами, поэтому загрузка
+# это перекладывание каждого пикселя процессором, а не копия. Замер:
+# glmark2 (буфер GPU, загрузки нет) даёт 48-81 кадр/с на всю площадь,
+# пульт в режиме заливки (буфер в памяти, работы для cairo почти нет) —
+# только 20.
+COMPOSITORS = [
+    ("как сейчас — текстуры тайлами", "comp-default"),
+    ("линейные текстуры — без перекладывания", "comp-linear"),
+    ("композитинг процессором (сломает GTK4)", "comp-cpu"),
+]
+
 SCALES = [
     ("300% — целый (1440 → 480)", "scale3"),
     ("300% — дробный 3.075, как из настроек", "scale-frac"),
@@ -183,6 +195,7 @@ class Lab(Gtk.Window):
 
         stack.add_titled(self._apps_page(), "apps", "Приложения")
         stack.add_titled(self._frames_page(), "frames", "Кадры")
+        stack.add_titled(self._comp_page(), "comp", "Композитор")
         stack.add_titled(self._scale_page(), "scale", "Масштаб")
         stack.add_titled(self._log_page(), "logs", "Журнал")
         stack.add_titled(self._shell_page(), "shell", "Оболочка")
@@ -434,6 +447,40 @@ class Lab(Gtk.Window):
             chunks.append("===== %s =====\n%s" % (name, tail.strip() or "(пусто)"))
         self.logview.get_buffer().set_text(
             "\n\n".join(chunks) or "Пока пусто.")
+
+    # ---- страница композитора ---------------------------------------
+    def _comp_page(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        hint = Gtk.Label()
+        hint.set_markup(
+            "<b>Как композитор забирает кадр.</b> Замер показал, что теряется\n"
+            "именно здесь: клиент с буфером GPU идёт 48-81 кадр/с на всю\n"
+            "площадь, а клиент с буфером в памяти — 20, хотя рисовать там\n"
+            "почти нечего.\n\n"
+            "Причина в раскладке: буфер GTK3 лежит построчно, текстуры Mali\n"
+            "уложены тайлами, и загрузка кадра — перекладывание каждого\n"
+            "пикселя процессором.\n\n"
+            "Оболочка перезапустится, пульт закроется — открой заново."
+        )
+        hint.set_xalign(0)
+        hint.set_line_wrap(True)
+        box.pack_start(big(hint, 1.0), False, False, 4)
+
+        for label, arg in COMPOSITORS:
+            btn = Gtk.Button(label=label)
+            btn.set_size_request(-1, 88)
+            big(btn.get_child(), 1.15)
+            btn.connect("clicked", self._on_comp, arg, label)
+            box.pack_start(btn, False, False, 0)
+        return box
+
+    def _on_comp(self, _btn, arg, label):
+        self.say("ставлю: %s…" % label)
+        out = self._helper([arg])
+        self.say(out or label)
 
     # ---- страница масштаба ------------------------------------------
     def _scale_page(self):

@@ -34,7 +34,49 @@ set_scale() {
 	sync
 }
 
+# Отдельный файл, а не правка dreamlte.conf: тот держит пределы
+# перезапуска и таймаут старта, и терять их при опытах не хочется.
+# systemd читает довески по алфавиту, renderer.conf идёт после
+# dreamlte.conf и переопределяет PAN_MESA_DEBUG.
+PHOC_DROPIN=/etc/systemd/system/phosh.service.d/renderer.conf
+
+set_phoc_env() {
+	mkdir -p "$(dirname "$PHOC_DROPIN")"
+	{
+		echo "# Записано пультом (dreamlte-switch-shell). Правится там же."
+		echo "[Service]"
+		for kv in "$@"; do
+			echo "Environment=$kv"
+		done
+	} > "$PHOC_DROPIN"
+	systemctl daemon-reload
+	sync
+}
+
 case "${1:-}" in
+comp-default)
+	# Как было: композитинг на GPU, текстуры в тайловой раскладке Mali.
+	set_phoc_env "PAN_MESA_DEBUG=noafbc"
+	echo "композитор: как раньше, перезапускаю оболочку"
+	systemctl restart phosh
+	;;
+comp-linear)
+	# Главная проверка. Буфер клиента на GTK3 лежит построчно, а текстуры
+	# Mali уложены тайлами, поэтому загрузка кадра — это перекладывание
+	# каждого пикселя процессором, а не копия. linear отменяет тайлы:
+	# загрузка становится обычным memcpy.
+	set_phoc_env "PAN_MESA_DEBUG=linear,noafbc"
+	echo "композитор: линейные текстуры, перезапускаю оболочку"
+	systemctl restart phosh
+	;;
+comp-cpu)
+	# Другой край: композитинг целиком процессором, загрузки в GPU нет
+	# вовсе. Клиенты, отдающие буфер GPU (всё на GTK4), при этом сломаются
+	# или уйдут в программную отрисовку — это опыт, а не режим на каждый день.
+	set_phoc_env "WLR_RENDERER=pixman"
+	echo "композитор: процессором (pixman), перезапускаю оболочку"
+	systemctl restart phosh
+	;;
 scale1|scale2|scale3|scale4)
 	set_scale "${1#scale}"
 	echo "масштаб ${1#scale}, перезапускаю оболочку"
@@ -79,7 +121,7 @@ reboot)
 	systemctl reboot
 	;;
 *)
-	echo "использование: dreamlte-switch-shell phosh|gnome|reboot|scale1..4|scale-frac" >&2
+	echo "использование: dreamlte-switch-shell phosh|gnome|reboot|scale1..4|scale-frac|comp-default|comp-linear|comp-cpu" >&2
 	exit 2
 	;;
 esac
