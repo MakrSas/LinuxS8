@@ -76,6 +76,11 @@ RENDERERS = [
     ("ngl с линейными текстурами", {"GSK_RENDERER": "ngl", "PAN_MESA_DEBUG": "linear"}),
     ("ngl — всё сразу", {"GSK_RENDERER": "ngl",
                          "PAN_MESA_DEBUG": "nofp16,nocrc,linear,noafbc"}),
+    # sync заставляет драйвер ждать каждое задание и падать на сбое GPU.
+    # Медленно, зато если ngl упирается в аварию железа, она попадёт в
+    # ~/lab-logs, а не растворится молча.
+    ("ngl + ловить сбои GPU (sync)", {"GSK_RENDERER": "ngl",
+                                      "PAN_MESA_DEBUG": "sync"}),
     ("cairo — процессором (заведомо целый)", {"GSK_RENDERER": "cairo"}),
 ]
 
@@ -179,6 +184,7 @@ class Lab(Gtk.Window):
         stack.add_titled(self._apps_page(), "apps", "Приложения")
         stack.add_titled(self._frames_page(), "frames", "Кадры")
         stack.add_titled(self._scale_page(), "scale", "Масштаб")
+        stack.add_titled(self._log_page(), "logs", "Журнал")
         stack.add_titled(self._shell_page(), "shell", "Оболочка")
         stack.add_titled(self._info_page(), "info", "Состояние")
 
@@ -382,6 +388,51 @@ class Lab(Gtk.Window):
                    cy + math.sin(a) * r * 0.5, r * 0.35, 0, 2 * math.pi)
             cr.fill()
         return False
+
+    # ---- страница журнала -------------------------------------------
+    #
+    # Вывод запущенных отсюда приложений идёт в ~/lab-logs. Без этой
+    # страницы прочитать его можно было только из TWRP, то есть ценой
+    # перезагрузки ради одной строчки.
+    def _log_page(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        btn = Gtk.Button(label="Обновить")
+        btn.set_size_request(-1, 80)
+        big(btn.get_child(), 1.25)
+        btn.connect("clicked", self._reload_logs)
+        box.pack_start(btn, False, False, 0)
+
+        self.logview = Gtk.TextView()
+        self.logview.set_editable(False)
+        self.logview.set_monospace(True)
+        self.logview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        scroll = Gtk.ScrolledWindow()
+        scroll.add(self.logview)
+        box.pack_start(scroll, True, True, 0)
+        return box
+
+    def _reload_logs(self, _btn=None):
+        try:
+            names = sorted(os.listdir(LOGDIR))
+        except OSError:
+            self.logview.get_buffer().set_text(
+                "Каталог %s ещё не создан — запусти что-нибудь со страницы "
+                "приложений." % LOGDIR)
+            return
+        chunks = []
+        for name in names:
+            path = os.path.join(LOGDIR, name)
+            try:
+                with open(path, errors="replace") as fh:
+                    tail = fh.read()[-4000:]
+            except OSError as exc:
+                tail = "(не читается: %s)" % exc
+            chunks.append("===== %s =====\n%s" % (name, tail.strip() or "(пусто)"))
+        self.logview.get_buffer().set_text(
+            "\n\n".join(chunks) or "Пока пусто.")
 
     # ---- страница масштаба ------------------------------------------
     def _scale_page(self):
