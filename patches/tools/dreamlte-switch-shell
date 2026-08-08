@@ -7,7 +7,46 @@
 # бы дырой размером с систему.
 set -eu
 
+PHOC_INI=/etc/phosh/phoc.ini
+MARK='# --- dreamlte -----'
+
+# Переписывает только наш блок в конце phoc.ini, всё, что выше маркера,
+# остаётся нетронутым.
+set_scale() {
+	local s="$1"
+	sed -i "/^$MARK/,\$d" "$PHOC_INI"
+	{
+		echo "$MARK----------------------------------------------"
+		echo "# Имя выхода именно Unknown-1: у simpledrm нет ни EDID, ни"
+		echo "# имени коннектора. Появится настоящий драйвер — имя сменится."
+		echo "#"
+		echo "# Масштаб задан здесь, а не в настройках: без EDID и серийного"
+		echo "# номера phosh не может опознать монитор и сохранить выбор."
+		echo "#"
+		echo "# Целое число важно не только для чёткости. GTK3, на котором"
+		echo "# написана вся оболочка, дробный масштаб не умеет вовсе: phoc"
+		echo "# выдаёт таким клиентам ближайшее целое сверху и потом ужимает"
+		echo "# картинку, то есть кадр рисуется крупнее нужного и ещё раз"
+		echo "# пересэмплируется."
+		echo "[output:Unknown-1]"
+		echo "scale = $s"
+	} >> "$PHOC_INI"
+	sync
+}
+
 case "${1:-}" in
+scale1|scale2|scale3|scale4)
+	set_scale "${1#scale}"
+	echo "масштаб ${1#scale}, перезапускаю оболочку"
+	systemctl restart phosh
+	;;
+scale-frac)
+	# Ровно то, что получается при выборе 300% в настройках: дробное
+	# значение, округлённое phoc до кратного 1/120.
+	set_scale "3.075"
+	echo "масштаб 3.075 (дробный), перезапускаю оболочку"
+	systemctl restart phosh
+	;;
 phosh)
 	rm -f /etc/systemd/system/graphical.target.wants/gdm3.service
 	rm -f /etc/systemd/system/display-manager.service
@@ -40,7 +79,7 @@ reboot)
 	systemctl reboot
 	;;
 *)
-	echo "использование: dreamlte-switch-shell phosh|gnome|reboot" >&2
+	echo "использование: dreamlte-switch-shell phosh|gnome|reboot|scale1..4|scale-frac" >&2
 	exit 2
 	;;
 esac

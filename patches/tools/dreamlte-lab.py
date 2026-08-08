@@ -40,15 +40,49 @@ APPS = [
 ]
 
 # В GTK 4.18 opengl, ngl и gl — три имени одного и того же отрисовщика,
-# так что выбор на самом деле бинарный.
+# так что по самому GSK выбор бинарный: ngl или cairo.
+#
+# Зато у panfrost есть рычаги, которыми можно попробовать заставить ngl
+# работать. Два из них — прямые подозреваемые в нашей поломке:
+#
+#   nofp16  GTK4 рисует промежуточные буферы в половинной точности.
+#           Если fp16 на Bifrost v6 хромает, картинка выйдет ровно такой,
+#           как мы видим: пустые окна при целой геометрии.
+#
+#   nocrc   "transaction elimination" — Mali пропускает запись тайлов,
+#           чьё содержимое не изменилось, сверяя контрольные суммы. Если
+#           механизм врёт, тайлы не записываются, и остаются пустые
+#           области.
+#
+#   linear  отключает тайловую раскладку текстур целиком. Грубо, зато
+#           отсекает целый класс причин.
+#
+# Каждый вариант задаёт PAN_MESA_DEBUG целиком, а не дополняет: иначе
+# непонятно, что именно проверяется.
 RENDERERS = [
-    ("ngl — как сейчас (OpenGL)", ""),
-    ("cairo — процессором", "cairo"),
+    ("ngl — как по умолчанию", {"GSK_RENDERER": "ngl"}),
+    ("ngl без fp16", {"GSK_RENDERER": "ngl", "PAN_MESA_DEBUG": "nofp16"}),
+    ("ngl без CRC-пропуска тайлов", {"GSK_RENDERER": "ngl", "PAN_MESA_DEBUG": "nocrc"}),
+    ("ngl с линейными текстурами", {"GSK_RENDERER": "ngl", "PAN_MESA_DEBUG": "linear"}),
+    ("ngl — всё сразу", {"GSK_RENDERER": "ngl",
+                         "PAN_MESA_DEBUG": "nofp16,nocrc,linear,noafbc"}),
+    ("cairo — процессором (заведомо целый)", {"GSK_RENDERER": "cairo"}),
 ]
 
 SHELLS = [
     ("phosh — оболочка для телефона", "phosh"),
     ("GNOME — привычный рабочий стол", "gnome"),
+]
+
+# 1440x2960 на 5.8 дюйма — это около 570 dpi, поэтому без масштаба
+# интерфейс нечитаемо мелкий. Логическая ширина при 3 равна 480 точкам,
+# при 4 — 360, что для phosh нижняя граница.
+SCALES = [
+    ("300% — целый (1440 → 480)", "scale3"),
+    ("300% — дробный 3.075, как из настроек", "scale-frac"),
+    ("400% — целый (1440 → 360)", "scale4"),
+    ("200% — целый (1440 → 720)", "scale2"),
+    ("100% — без масштаба", "scale1"),
 ]
 
 
@@ -105,13 +139,15 @@ class Lab(Gtk.Window):
     def __init__(self):
         super().__init__(title="Лаборатория dreamlte")
         self.set_default_size(720, 1400)
-        self.renderer = ""
+        self.renderer = dict(RENDERERS[0][1])
+        self.renderer_name = RENDERERS[0][0]
 
         stack = Gtk.Stack()
         stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
         switcher = Gtk.StackSwitcher(stack=stack)
 
         stack.add_titled(self._apps_page(), "apps", "Приложения")
+        stack.add_titled(self._scale_page(), "scale", "Масштаб")
         stack.add_titled(self._shell_page(), "shell", "Оболочка")
         stack.add_titled(self._info_page(), "info", "Состояние")
 
@@ -143,9 +179,10 @@ class Lab(Gtk.Window):
 
         hint = Gtk.Label()
         hint.set_markup(
-            "<b>Отрисовщик GTK4.</b> Приложения на GTK4 с ngl рисуются\n"
-            "сломанными: пропадают скругления, текст и полупрозрачные слои.\n"
-            "cairo считает содержимое процессором — медленнее, но верно."
+            "<b>Отрисовщик GTK4.</b> С ngl окна выходят пустыми: пропадают\n"
+            "скругления, текст и полупрозрачные слои. cairo рисует верно, но\n"
+            "процессором. Остальные варианты — попытки заставить ngl работать,\n"
+            "отключая по одному механизму panfrost."
         )
         hint.set_xalign(0)
         hint.set_line_wrap(True)
@@ -156,8 +193,8 @@ class Lab(Gtk.Window):
             btn = Gtk.RadioButton.new_with_label_from_widget(first, label)
             if first is None:
                 first = btn
-            btn.connect("toggled", self._on_renderer, value)
-            box.pack_start(big(btn, 1.2), False, False, 0)
+            btn.connect("toggled", self._on_renderer, value, label)
+            box.pack_start(big(btn, 1.1), False, False, 0)
 
         box.pack_start(Gtk.Separator(), False, False, 6)
 
@@ -174,25 +211,57 @@ class Lab(Gtk.Window):
         box.pack_start(scroll, True, True, 0)
         return box
 
-    def _on_renderer(self, btn, value):
+    def _on_renderer(self, btn, value, name):
         if btn.get_active():
-            self.renderer = value
-            self.say(f"отрисовщик: {value or 'ngl (по умолчанию)'}")
+            self.renderer = dict(value)
+            self.renderer_name = name
+            self.say(f"выбрано: {name}")
 
     def _on_launch(self, _btn, cmd, label):
-        env = {"GSK_RENDERER": self.renderer} if self.renderer else {}
-        # Пустое значение хуже отсутствия: GTK ругается на неизвестное имя.
-        if not self.renderer:
-            env = {}
-            os.environ.pop("GSK_RENDERER", None)
-        err = run_detached([cmd], env)
+        err = run_detached([cmd], self.renderer)
         if err:
             self.say(f"не запустилось: {label} — {err}")
         else:
-            self.say(f"запущено: {label}, отрисовщик "
-                     f"{self.renderer or 'ngl'}")
+            env_str = " ".join(f"{k}={v}" for k, v in sorted(self.renderer.items()))
+            self.say(f"{label}: {env_str}")
 
     # ---- страница оболочки ------------------------------------------
+    # ---- страница масштаба ------------------------------------------
+    def _scale_page(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        hint = Gtk.Label()
+        hint.set_markup(
+            "<b>Масштаб экрана.</b> Целое число здесь важно не только для\n"
+            "чёткости. GTK3, на котором написана вся оболочка, дробный\n"
+            "масштаб не умеет: phoc выдаёт таким клиентам ближайшее целое\n"
+            "сверху и потом ужимает картинку. При 3.075 оболочка рисуется\n"
+            "как при 4 — это 1.7 раза лишних пикселей плюс пересэмплирование\n"
+            "каждого кадра.\n\n"
+            "Выбор в настройках между перезагрузками не держится: у simpledrm\n"
+            "нет ни EDID, ни серийного номера, опознать монитор нечем. Здесь\n"
+            "он пишется в phoc.ini, поэтому переживает перезагрузку.\n\n"
+            "Оболочка перезапустится, пульт закроется — открой заново."
+        )
+        hint.set_xalign(0)
+        hint.set_line_wrap(True)
+        box.pack_start(big(hint, 1.0), False, False, 4)
+
+        for label, arg in SCALES:
+            btn = Gtk.Button(label=label)
+            btn.set_size_request(-1, 88)
+            big(btn.get_child(), 1.25)
+            btn.connect("clicked", self._on_scale, arg, label)
+            box.pack_start(btn, False, False, 0)
+        return box
+
+    def _on_scale(self, _btn, arg, label):
+        self.say(f"ставлю {label}…")
+        out = self._helper([arg])
+        self.say(out or f"масштаб: {label}")
+
     def _shell_page(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         box.set_margin_start(12)
@@ -302,7 +371,9 @@ class Lab(Gtk.Window):
         except Exception:  # noqa: BLE001
             lines.append("Сбросов GPU: нет доступа к dmesg")
 
-        lines.append(f"Текущий отрисовщик для запуска: {self.renderer or 'ngl'}")
+        lines.append(f"Выбрано для запуска: {self.renderer_name}")
+        for k, v in sorted(self.renderer.items()):
+            lines.append(f"  {k}={v}")
         lines.append(f"Снимки экрана: {SHOTS}")
         self.info.set_text("\n".join(lines))
         return False
