@@ -1,0 +1,20 @@
+[Unit]
+# Сеть по USB — единственный канал к загруженной системе, поэтому
+# поднимаем её рано и независимо от того, встал ли графический сеанс.
+Description=Сеть по USB (CDC ECM) для dreamlte
+DefaultDependencies=no
+After=sysinit.target
+Before=network.target sshd.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/dreamlte-usbnet
+# Гаджет может не подняться, если PHY не завёлся. Это не повод ронять
+# загрузку: телефон должен доехать до оболочки, чтобы можно было
+# посмотреть журнал пультом.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=sysinit.target
