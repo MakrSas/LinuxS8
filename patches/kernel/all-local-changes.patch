@@ -1,8 +1,8 @@
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
-index 305dc72f9..e63f5b818 100644
+index 305dc72f9..6c84a831e 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
 +++ b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
-@@ -26,6 +26,18 @@ chosen {
+@@ -26,6 +26,34 @@ chosen {
  		#size-cells = <1>;
  		ranges;
  
@@ -16,12 +16,28 @@ index 305dc72f9..e63f5b818 100644
 +		 * Drop these once the UFS/USB blocks properly claim their
 +		 * clocks and power domains.
 +		 */
-+		bootargs = "clk_ignore_unused pd_ignore_unused console=ttySAC0,115200 console=tty0";
++		/*
++		 * systemd.gpt_auto=0 отключает systemd-gpt-auto-generator, и
++		 * это не косметика. Samsung пометил USERDATA (sda29) типом
++		 * GPT c12a7328-f81f-11d2-ba4b-00a0c93ec93b, то есть "EFI
++		 * System Partition" — а мы положили на этот раздел корень.
++		 * Генератор честно находит "ESP" на том же диске, где корень,
++		 * и заводит boot.automount на /boot; дальше systemd пытается
++		 * смонтировать наш собственный корень как vfat и, разумеется,
++		 * не может. В журнале это выглядит как повторяющееся
++		 *
++		 *   Failed to mount boot.mount - EFI System Partition Automount
++		 *
++		 * на каждое обращение к /boot. UEFI на устройстве нет вовсе
++		 * ("efi: UEFI not found" строкой выше в том же журнале), так
++		 * что генератору тут делать нечего в принципе.
++		 */
++		bootargs = "clk_ignore_unused pd_ignore_unused systemd.gpt_auto=0 console=ttySAC0,115200 console=tty0";
 +
  		framebuffer: framebuffer@cc000000 {
  			compatible = "simple-framebuffer";
  			reg = <0 0xcc000000 (1440 * 2960 * 4)>;
-@@ -48,11 +60,20 @@ reserved-memory {
+@@ -48,11 +76,20 @@ reserved-memory {
  		#size-cells = <1>;
  		ranges;
  
@@ -44,7 +60,7 @@ index 305dc72f9..e63f5b818 100644
  		};
  
  		cont_splash_mem: framebuffer@cc000000 {
-@@ -100,6 +121,72 @@ reg_placeholder: regulator-0 {
+@@ -100,6 +137,99 @@ reg_placeholder: regulator-0 {
  		compatible = "regulator-fixed";
  		regulator-name = "reg-placeholder";
  	};
@@ -107,6 +123,20 @@ index 305dc72f9..e63f5b818 100644
 + * the vendor kernel (see drivers/phy/samsung/phy-exynos8895-ufs.c) and a
 + * single real ref_clk instead of four placeholder &oscclk entries.
 + */
++/*
++ * 2026-08-08: сеть по кабелю вместо похода в TWRP за каждым файлом.
++ * Телефон будет представляться хосту сетевой картой (CDC ECM), поверх неё
++ * пойдут ssh и apt. Вай-фай для этого не годится: он на PCIe, а контроллера
++ * PCIe для 8895 в мейнлайне нет вовсе.
++ */
++&usbdrd_phy {
++	status = "okay";
++};
++
++&usbdrd {
++	status = "okay";
++};
++
 +&ufs_phy {
 +	status = "okay";
 +};
@@ -114,10 +144,66 @@ index 305dc72f9..e63f5b818 100644
 +&ufs {
 +	vcc-supply = <&reg_ufs_vcc>;
 +	status = "okay";
++};
++
++/*
++ * 2026-08-08, первый заход: включаем GPU и смотрим, что скажет panfrost.
++ *
++ * Регулятор mali-supply намеренно не описан. Линия питания G3D идёт от
++ * PMIC S2MPS17, а для него в mainline нет ни драйвера, ни шины SPEEDY —
++ * та же стена, что у vqmmc карты памяти. Регуляторное ядро подставит
++ * заглушку, и probe это не остановит; включена ли линия на самом деле,
++ * узнаем по тому, читается ли GPU_ID.
++ */
++&gpu {
++	status = "okay";
  };
  
  &hsi2c_23 {
-@@ -129,19 +216,56 @@ &mmc {
+@@ -109,6 +239,42 @@ touchscreen@48 {
+ 		compatible = "samsung,s6sy761";
+ 		reg = <0x48>;
+ 
++		/*
++		 * Размеры заданы вручную, потому что контроллер их не сообщает.
++		 * s6sy761_hw_init() читает S6SY761_PANEL_INFO и берёт максимумы
++		 * оттуда, но на этом устройстве читаются нули — драйвер сам
++		 * жалуется в лог:
++		 *
++		 *   s6sy761 0-0048: the axis have not been set
++		 *
++		 * С нулевыми максимумами libinput не может отобразить касание
++		 * на экран, и получается ровно то, что видно на глаз: у начала
++		 * координат ещё сносно, а к дальнему краю всё уезжает — углы
++		 * не нажимаются, нажатие и отпускание попадают в разные
++		 * элементы (подсветка есть, а клика нет).
++		 *
++		 * touchscreen_parse_properties() вызывается ПОСЛЕ чтения из
++		 * железа и перекрывает его, так что эти два свойства и есть
++		 * лечение.
++		 *
++		 * Значения НЕ в пикселях панели. Первая попытка с 1440x2960
++		 * сделала хуже: телефон перестал разблокироваться, потому что
++		 * свайп вверх упирался в край. У Samsung на Exynos8895 два
++		 * разных контроллера тача, и координатные поля у них разные —
++		 * видно по dts соседних устройств:
++		 *
++		 *   sec,max_coords = <4095 4095>   контроллер Samsung (наш)
++		 *   stm,max_coords = <1439 2959>   контроллер STM
++		 *
++		 * Я взял значения от STM-варианта, а у s6sy761 поле 4096x4096,
++		 * то есть всё дальше ~35% экрана обрезалось.
++		 *
++		 * Свойство задаёт РАЗМЕР, а максимум получается на единицу
++		 * меньше (touchscreen.c: maximum - 1), поэтому 4096, а не 4095.
++		 */
++		touchscreen-size-x = <4096>;
++		touchscreen-size-y = <4096>;
++
+ 		/* TODO: Update once PMIC is implemented */
+ 		avdd-supply = <&reg_placeholder>;
+ 		vdd-supply = <&reg_placeholder>;
+@@ -129,19 +295,56 @@ &mmc {
  	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd2_cd>;
  	pinctrl-names = "default";
  
@@ -179,7 +265,7 @@ index 305dc72f9..e63f5b818 100644
  
  	status = "okay";
  };
-@@ -194,3 +318,24 @@ &usi9 {
+@@ -194,3 +397,24 @@ &usi9 {
  	samsung,mode = <USI_MODE_I2C0_1>;
  	status = "okay";
  };
@@ -205,10 +291,80 @@ index 305dc72f9..e63f5b818 100644
 +	samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
 +};
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
-index ff114cd6c..a21e68814 100644
+index ff114cd6c..11d12f86b 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 +++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
-@@ -1433,6 +1433,18 @@ mmc: mmc@11500000 {
+@@ -1374,6 +1374,69 @@ spi_1: spi@109e0000 {
+ 			status = "disabled";
+ 		};
+ 
++		cmu_g3d: clock-controller@13800000 {
++			compatible = "samsung,exynos8895-cmu-g3d";
++			reg = <0x13800000 0x8000>;
++			#clock-cells = <1>;
++			clocks = <&oscclk>,
++				 <&cmu_top CLK_DOUT_CMU_G3D_SWITCH>;
++			clock-names = "oscclk", "switch";
++			power-domains = <&pd_g3d>;
++
++			/*
++			 * Уводим GPU с PLL_G3D на переключаемый такт из
++			 * CMU_TOP, и это осознанный обход, а не оптимизация.
++			 *
++			 * MUX_CLK_G3D_BUSD по сбросу выбирает PLL_G3D, но
++			 * заставить тот захватиться не удалось: "Could not
++			 * lock PLL fout_g3d_pll", а PLL_CON0 остаётся нулём
++			 * после записи. Адрес регистра исправлен с 0x120 на
++			 * 0x140, но это пока предположение из pmucal, а не
++			 * проверенный факт.
++			 *
++			 * Путь через dout_cmu_g3d_switch, наоборот, заведомо
++			 * живой: он уже давал 800 МГц в clk_summary. Между
++			 * этим муксом и гейтом AGPU делителя больше нет, так
++			 * что частота мукса и есть частота Mali.
++			 *
++			 * 400 МГц, а не 200: замер показал, что вся вялость
++			 * интерфейса объясняется частотой. При лёгком шейдере
++			 * GPU даёт 405 Мпикс/с, то есть полноэкранный проход
++			 * 1440x2960 стоит 10.5 мс. Композитору нужно
++			 * несколько проходов на кадр — отсюда и 25 кадров.
++			 *
++			 * И не 800 сразу: управления температурой у нас нет
++			 * вовсе. Вендор крутит G3D до 860 МГц, но с DVFS и
++			 * тепловым троттлингом, а телефон без активного
++			 * охлаждения. Шаг вдвое даёт проверяемый выигрыш без
++			 * риска загнать SoC в перегрев постоянной частотой.
++			 *
++			 * DVFS через PLL_G3D — отдельная задача на потом.
++			 */
++			assigned-clocks = <&cmu_top CLK_DOUT_CMU_G3D_SWITCH>,
++					  <&cmu_g3d CLK_MOUT_G3D_BUSD>;
++			assigned-clock-parents = <0>,
++						 <&cmu_g3d CLK_MOUT_G3D_SWITCH_USER>;
++			assigned-clock-rates = <400000000>, <0>;
++		};
++
++		gpu: gpu@13900000 {
++			compatible = "samsung,exynos8895-mali", "arm,mali-bifrost";
++			reg = <0x13900000 0x5000>;
++			/*
++			 * Порядок и имена — из биндинга panfrost. В
++			 * даунстриме те же номера подписаны JOB/MMU/GPU,
++			 * то есть 60, 61 и 59 соответственно.
++			 */
++			interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 61 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 59 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "job", "mmu", "gpu";
++			clocks = <&cmu_g3d CLK_GOUT_G3D_AGPU>;
++			power-domains = <&pd_g3d>;
++			status = "disabled";
++		};
++
+ 		cmu_fsys0: clock-controller@11000000 {
+ 			compatible = "samsung,exynos8895-cmu-fsys0";
+ 			reg = <0x11000000 0x8000>;
+@@ -1433,6 +1496,18 @@ mmc: mmc@11500000 {
  			clocks = <&cmu_fsys1 CLK_GOUT_FSYS1_MMC_CARD_I_ACLK>,
  				 <&cmu_fsys1 CLK_GOUT_FSYS1_MMC_CARD_SDCLKIN>;
  			clock-names = "biu", "ciu";
@@ -227,7 +383,7 @@ index ff114cd6c..a21e68814 100644
  			fifo-depth = <64>;
  			interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH>;
  			#address-cells = <1>;
-@@ -1440,6 +1452,96 @@ mmc: mmc@11500000 {
+@@ -1440,6 +1515,160 @@ mmc: mmc@11500000 {
  			status = "disabled";
  		};
  
@@ -247,6 +403,70 @@ index ff114cd6c..a21e68814 100644
 +		 * Previous boot attempt with the 0x720 default hung solid;
 +		 * this is the leading suspect why. See docs/progress-log.md.
 +		 */
++		/*
++		 * USB 3.0 DRD. Нужен нам не ради скорости, а ради сети по
++		 * кабелю: у загруженной системы нет ни вай-фая (он висит на
++		 * PCIe, которого в мейнлайне для 8895 нет), ни adb, поэтому
++		 * каждый обмен файлами до сих пор стоил похода в TWRP.
++		 *
++		 * Заявлена только высокая скорость: 480 Мбит/с для ssh и apt
++		 * с запасом, а PHY третьей версии (PIPE3) — отдельный блок со
++		 * своей калибровкой, и трогать его ради этого незачем.
++		 */
++		usbdrd_phy: phy@10e00000 {
++			compatible = "samsung,exynos8895-usbdrd-phy";
++			/*
++			 * Три области, и все обязательны:
++			 *   первая  — сам блок PHY;
++			 *   вторая  — второй экземпляр PHY. Оба выводятся из
++			 *             спящего режима вместе, и только через
++			 *             миллисекунду неиспользуемый гасится
++			 *             обратно. Поднять один — не то же самое;
++			 *   третья  — регистр выбора источника опорного такта,
++			 *             лежащий вне блока PHY вовсе.
++			 *
++			 * "ref" — кварц: по его частоте считается делитель
++			 * умножителя внутри PHY.
++			 */
++			reg = <0x10e00000 0x100>,
++			      <0x10e10000 0x100>,
++			      <0x10e50070 0x10>;
++			clocks = <&cmu_fsys0 CLK_GOUT_FSYS0_USBTV_I_USB30DRD_ACLK>,
++				 <&oscclk>;
++			clock-names = "phy", "ref";
++			samsung,pmu-syscon = <&pmu_system_controller 0x704>;
++			#phy-cells = <1>;
++			status = "disabled";
++		};
++
++		usbdrd: usb@10c00000 {
++			compatible = "samsung,exynos8895-dwusb3";
++			ranges;
++			#address-cells = <1>;
++			#size-cells = <1>;
++			clocks = <&cmu_fsys0 CLK_GOUT_FSYS0_USBTV_I_USB30DRD_ACLK>,
++				 <&cmu_fsys0 CLK_GOUT_FSYS0_USBTV_I_USB30DRD_SUSPEND_CLK>,
++				 <&cmu_fsys0 CLK_GOUT_FSYS0_USBTV_I_USB30DRD_REF_CLK>;
++			clock-names = "aclk", "susp_clk", "ref_clk";
++			status = "disabled";
++
++			usb@10c00000 {
++				compatible = "snps,dwc3";
++				reg = <0x10c00000 0x10000>;
++				interrupts = <GIC_SPI 337 IRQ_TYPE_LEVEL_HIGH>;
++				phys = <&usbdrd_phy 0>;
++				phy-names = "usb2-phy";
++				/*
++				 * Периферия, а не хост: телефон должен
++				 * представляться сетевой картой хосту.
++				 */
++				dr_mode = "peripheral";
++				maximum-speed = "high-speed";
++				snps,dis_u2_susphy_quirk;
++				snps,dis_enblslpm_quirk;
++			};
++		};
++
 +		ufs_phy: phy@11124000 {
 +			compatible = "samsung,exynos8895-ufs-phy";
 +			reg = <0x11124000 0x800>;
@@ -324,6 +544,216 @@ index ff114cd6c..a21e68814 100644
  		pinctrl_abox: pinctrl@13e60000 {
  			compatible = "samsung,exynos8895-pinctrl";
  			reg = <0x13e60000 0x1000>;
+@@ -1470,6 +1699,24 @@ pmu_system_controller: system-controller@16480000 {
+ 			reg = <0x16480000 0x10000>;
+ 		};
+ 
++		/*
++		 * Домен питания GPU. В даунстриме он называется
++		 * EMBEDDED_G3D и включается последовательностью pmucal:
++		 * записать 0xF в биты[3:0] регистра CONFIGURATION
++		 * (PMU + 0x40E0) и дождаться 0xF в STATUS (PMU + 0x40E4).
++		 *
++		 * Это в точности то, что делает драйвер
++		 * samsung,exynos5433-pd: он берёт reg как адрес
++		 * CONFIGURATION, читает статус по reg + 4 и использует
++		 * маску local_pwr_cfg = 0xf. Своего драйвера не нужно.
++		 */
++		pd_g3d: power-domain@164840e0 {
++			compatible = "samsung,exynos5433-pd";
++			reg = <0x164840e0 0x20>;
++			#power-domain-cells = <0>;
++			label = "G3D";
++		};
++
+ 		pinctrl_alive: pinctrl@164b0000 {
+ 			compatible = "samsung,exynos8895-pinctrl";
+ 			reg = <0x164b0000 0x1000>;
+diff --git a/drivers/clk/samsung/clk-exynos8895.c b/drivers/clk/samsung/clk-exynos8895.c
+index 259481c42..7c39a5e3d 100644
+--- a/drivers/clk/samsung/clk-exynos8895.c
++++ b/drivers/clk/samsung/clk-exynos8895.c
+@@ -22,6 +22,7 @@
+ #define CLKS_NR_PERIC0	(CLK_GOUT_PERIC0_USI03_I_SCLK_USI + 1)
+ #define CLKS_NR_PERIC1	(CLK_GOUT_PERIC1_XIU_P_PERIC1_ACLK + 1)
+ #define CLKS_NR_PERIS	(CLK_GOUT_PERIS_XIU_P_PERIS_ACLK + 1)
++#define CLKS_NR_G3D	(CLK_GOUT_G3D_XIU_P_G3D_ACLK + 1)
+ 
+ /* ---- CMU_TOP ------------------------------------------------------------- */
+ 
+@@ -2758,6 +2759,162 @@ static const struct samsung_cmu_info peric1_cmu_info __initconst = {
+ 	.clk_name		= "bus",
+ };
+ 
++/* ---- CMU_G3D ------------------------------------------------------------- */
++
++/* Register Offset definitions for CMU_G3D (0x13800000) */
++#define PLL_LOCKTIME_PLL_G3D							0x0000
++#define PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER					0x0100
++#define PLL_CON2_MUX_CLKCMU_G3D_SWITCH_USER					0x0108
++/*
++ * 0x0140, а не 0x0120, и это исправление по факту.
++ *
++ * У даунстрима две таблицы расходятся: cmucal кладёт PLL_CON0_PLL_G3D на
++ * 0x0120, pmucal — на 0x0140 (а PLL_CON2 на 0x0148). Сначала было взято
++ * значение cmucal, по аналогии с шагом слотов 0x20 у CMU_TOP и CMU_FSYS0.
++ * Железо ответило иначе: 0x0120 читается нулём и остаётся нулём после
++ * записи, а PLL не захватывается ("Could not lock PLL fout_g3d_pll").
++ * Записи в неподключённые регистры CMU просто теряются, так что нулевое
++ * чтение — это признак несуществующего регистра, а не выключенного PLL.
++ *
++ * Довод про шаг слотов оказался слабым: он говорит, где МОГУТ быть слоты,
++ * но не какой из них чей. pmucal при этом — код, который реально включает
++ * домен на живом устройстве, и доверия ему больше.
++ */
++#define PLL_CON0_PLL_G3D							0x0140
++#define PLL_CON2_PLL_G3D							0x0148
++#define CLK_CON_MUX_MUX_CLK_G3D_BUSD						0x1000
++#define CLK_CON_DIV_DIV_CLK_G3D_BUSP						0x1804
++#define CLK_CON_GAT_CLK_BLK_G3D_UID_G3D_CMU_G3D_IPCLKPORT_PCLK			0x2004
++#define CLK_CON_GAT_CLK_BLK_G3D_UID_HPM_G3D_IPCLKPORT_HPM_TARGETCLK_C		0x2008
++#define CLK_CON_GAT_GATE_CLK_G3D_AGPU						0x201c
++#define CLK_CON_GAT_GOUT_BLK_G3D_UID_AXI2APB_G3D_IPCLKPORT_ACLK			0x2020
++#define CLK_CON_GAT_GOUT_BLK_G3D_UID_BUSIF_HPMG3D_IPCLKPORT_PCLK		0x2024
++#define CLK_CON_GAT_GOUT_BLK_G3D_UID_LHM_AXI_P_G3D_IPCLKPORT_I_CLK		0x2028
++#define CLK_CON_GAT_GOUT_BLK_G3D_UID_LHS_AXI_G3DSFR_IPCLKPORT_I_CLK		0x202c
++#define CLK_CON_GAT_GOUT_BLK_G3D_UID_PMU_G3D_IPCLKPORT_PCLK			0x2030
++#define CLK_CON_GAT_GOUT_BLK_G3D_UID_RSTNSYNC_CLK_G3D_BUSP_IPCLKPORT_CLK	0x2034
++#define CLK_CON_GAT_GOUT_BLK_G3D_UID_SYSREG_G3D_IPCLKPORT_PCLK			0x2038
++#define CLK_CON_GAT_GOUT_BLK_G3D_UID_XIU_P_G3D_IPCLKPORT_ACLK			0x203c
++
++static const unsigned long g3d_clk_regs[] __initconst = {
++	PLL_LOCKTIME_PLL_G3D,
++	PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER,
++	PLL_CON2_MUX_CLKCMU_G3D_SWITCH_USER,
++	PLL_CON0_PLL_G3D,
++	PLL_CON2_PLL_G3D,
++	CLK_CON_MUX_MUX_CLK_G3D_BUSD,
++	CLK_CON_DIV_DIV_CLK_G3D_BUSP,
++	CLK_CON_GAT_CLK_BLK_G3D_UID_G3D_CMU_G3D_IPCLKPORT_PCLK,
++	CLK_CON_GAT_CLK_BLK_G3D_UID_HPM_G3D_IPCLKPORT_HPM_TARGETCLK_C,
++	CLK_CON_GAT_GATE_CLK_G3D_AGPU,
++	CLK_CON_GAT_GOUT_BLK_G3D_UID_AXI2APB_G3D_IPCLKPORT_ACLK,
++	CLK_CON_GAT_GOUT_BLK_G3D_UID_BUSIF_HPMG3D_IPCLKPORT_PCLK,
++	CLK_CON_GAT_GOUT_BLK_G3D_UID_LHM_AXI_P_G3D_IPCLKPORT_I_CLK,
++	CLK_CON_GAT_GOUT_BLK_G3D_UID_LHS_AXI_G3DSFR_IPCLKPORT_I_CLK,
++	CLK_CON_GAT_GOUT_BLK_G3D_UID_PMU_G3D_IPCLKPORT_PCLK,
++	CLK_CON_GAT_GOUT_BLK_G3D_UID_RSTNSYNC_CLK_G3D_BUSP_IPCLKPORT_CLK,
++	CLK_CON_GAT_GOUT_BLK_G3D_UID_SYSREG_G3D_IPCLKPORT_PCLK,
++	CLK_CON_GAT_GOUT_BLK_G3D_UID_XIU_P_G3D_IPCLKPORT_ACLK,
++};
++
++static const struct samsung_pll_rate_table pll_g3d_rate_table[] __initconst = {
++	PLL_35XX_RATE(26 * MHZ, 860000000U, 430, 13, 0),
++	PLL_35XX_RATE(26 * MHZ, 600000000U, 300, 13, 0),
++	PLL_35XX_RATE(26 * MHZ, 300000000U, 150, 13, 0),
++};
++
++static const struct samsung_pll_clock g3d_pll_clks[] __initconst = {
++	PLL(pll_1052x, CLK_FOUT_G3D_PLL, "fout_g3d_pll", "oscclk",
++	    PLL_LOCKTIME_PLL_G3D, PLL_CON0_PLL_G3D, pll_g3d_rate_table),
++};
++
++/* List of parent clocks for Muxes in CMU_G3D */
++PNAME(mout_g3d_switch_user_p)	= { "oscclk", "dout_cmu_g3d_switch" };
++PNAME(mout_g3d_busd_p)		= { "fout_g3d_pll", "mout_g3d_switch_user" };
++
++static const struct samsung_mux_clock g3d_mux_clks[] __initconst = {
++	MUX(CLK_MOUT_G3D_SWITCH_USER, "mout_g3d_switch_user",
++	    mout_g3d_switch_user_p, PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER, 4, 1),
++	MUX(CLK_MOUT_G3D_BUSD, "mout_g3d_busd", mout_g3d_busd_p,
++	    CLK_CON_MUX_MUX_CLK_G3D_BUSD, 0, 1),
++};
++
++static const struct samsung_div_clock g3d_div_clks[] __initconst = {
++	DIV(CLK_DOUT_G3D_BUSP, "dout_g3d_busp", "mout_g3d_busd",
++	    CLK_CON_DIV_DIV_CLK_G3D_BUSP, 0, 3),
++};
++
++static const struct samsung_gate_clock g3d_gate_clks[] __initconst = {
++	/*
++	 * Без CLK_IS_CRITICAL намеренно. С ним любая заминка выше по
++	 * цепочке (например, незахватившийся PLL) превращается из
++	 * предупреждения в отказ регистрации всего блока тактов:
++	 * "critical clk failed to enable" -> -ETIMEDOUT. На bring-up это
++	 * прячет настоящую причину за посторонней ошибкой.
++	 */
++	GATE(CLK_GOUT_G3D_CMU_G3D_PCLK, "gout_g3d_cmu_g3d_pclk",
++	     "dout_g3d_busp",
++	     CLK_CON_GAT_CLK_BLK_G3D_UID_G3D_CMU_G3D_IPCLKPORT_PCLK,
++	     21, CLK_IGNORE_UNUSED, 0),
++	/*
++	 * AGPU — это и есть такт самого Mali. Идёт от MUX_CLK_G3D_BUSD, то
++	 * есть либо от PLL_G3D, либо от переключаемого такта из CMU_TOP.
++	 */
++	GATE(CLK_GOUT_G3D_AGPU, "gout_g3d_agpu", "mout_g3d_busd",
++	     CLK_CON_GAT_GATE_CLK_G3D_AGPU, 21, 0, 0),
++	GATE(CLK_GOUT_G3D_AXI2APB_G3D_ACLK, "gout_g3d_axi2apb_g3d_aclk",
++	     "dout_g3d_busp",
++	     CLK_CON_GAT_GOUT_BLK_G3D_UID_AXI2APB_G3D_IPCLKPORT_ACLK,
++	     21, CLK_IGNORE_UNUSED, 0),
++	GATE(CLK_GOUT_G3D_BUSIF_HPMG3D_PCLK, "gout_g3d_busif_hpmg3d_pclk",
++	     "dout_g3d_busp",
++	     CLK_CON_GAT_GOUT_BLK_G3D_UID_BUSIF_HPMG3D_IPCLKPORT_PCLK,
++	     21, 0, 0),
++	GATE(CLK_GOUT_G3D_HPM_G3D_TARGETCLK, "gout_g3d_hpm_g3d_targetclk",
++	     "mout_g3d_busd",
++	     CLK_CON_GAT_CLK_BLK_G3D_UID_HPM_G3D_IPCLKPORT_HPM_TARGETCLK_C,
++	     21, 0, 0),
++	GATE(CLK_GOUT_G3D_LHM_AXI_P_G3D_I_CLK, "gout_g3d_lhm_axi_p_g3d_i_clk",
++	     "dout_g3d_busp",
++	     CLK_CON_GAT_GOUT_BLK_G3D_UID_LHM_AXI_P_G3D_IPCLKPORT_I_CLK,
++	     21, CLK_IGNORE_UNUSED, 0),
++	GATE(CLK_GOUT_G3D_LHS_AXI_G3DSFR_I_CLK,
++	     "gout_g3d_lhs_axi_g3dsfr_i_clk", "dout_g3d_busp",
++	     CLK_CON_GAT_GOUT_BLK_G3D_UID_LHS_AXI_G3DSFR_IPCLKPORT_I_CLK,
++	     21, CLK_IGNORE_UNUSED, 0),
++	GATE(CLK_GOUT_G3D_PMU_G3D_PCLK, "gout_g3d_pmu_g3d_pclk",
++	     "dout_g3d_busp",
++	     CLK_CON_GAT_GOUT_BLK_G3D_UID_PMU_G3D_IPCLKPORT_PCLK,
++	     21, CLK_IGNORE_UNUSED, 0),
++	GATE(CLK_GOUT_G3D_RSTNSYNC_CLK_G3D_BUSP_CLK,
++	     "gout_g3d_rstnsync_clk_g3d_busp_clk", "dout_g3d_busp",
++	     CLK_CON_GAT_GOUT_BLK_G3D_UID_RSTNSYNC_CLK_G3D_BUSP_IPCLKPORT_CLK,
++	     21, CLK_IGNORE_UNUSED, 0),
++	GATE(CLK_GOUT_G3D_SYSREG_G3D_PCLK, "gout_g3d_sysreg_g3d_pclk",
++	     "dout_g3d_busp",
++	     CLK_CON_GAT_GOUT_BLK_G3D_UID_SYSREG_G3D_IPCLKPORT_PCLK,
++	     21, CLK_IGNORE_UNUSED, 0),
++	GATE(CLK_GOUT_G3D_XIU_P_G3D_ACLK, "gout_g3d_xiu_p_g3d_aclk",
++	     "dout_g3d_busp",
++	     CLK_CON_GAT_GOUT_BLK_G3D_UID_XIU_P_G3D_IPCLKPORT_ACLK,
++	     21, CLK_IGNORE_UNUSED, 0),
++};
++
++static const struct samsung_cmu_info g3d_cmu_info __initconst = {
++	.pll_clks		= g3d_pll_clks,
++	.nr_pll_clks		= ARRAY_SIZE(g3d_pll_clks),
++	.mux_clks		= g3d_mux_clks,
++	.nr_mux_clks		= ARRAY_SIZE(g3d_mux_clks),
++	.div_clks		= g3d_div_clks,
++	.nr_div_clks		= ARRAY_SIZE(g3d_div_clks),
++	.gate_clks		= g3d_gate_clks,
++	.nr_gate_clks		= ARRAY_SIZE(g3d_gate_clks),
++	.nr_clk_ids		= CLKS_NR_G3D,
++	.clk_regs		= g3d_clk_regs,
++	.nr_clk_regs		= ARRAY_SIZE(g3d_clk_regs),
++	.clk_name		= "switch",
++};
++
+ static int __init exynos8895_cmu_probe(struct platform_device *pdev)
+ {
+ 	const struct samsung_cmu_info *info;
+@@ -2773,6 +2930,9 @@ static const struct of_device_id exynos8895_cmu_of_match[] = {
+ 	{
+ 		.compatible = "samsung,exynos8895-cmu-fsys0",
+ 		.data = &fsys0_cmu_info,
++	}, {
++		.compatible = "samsung,exynos8895-cmu-g3d",
++		.data = &g3d_cmu_info,
+ 	}, {
+ 		.compatible = "samsung,exynos8895-cmu-fsys1",
+ 		.data = &fsys1_cmu_info,
 diff --git a/drivers/mmc/host/dw_mmc-exynos.c b/drivers/mmc/host/dw_mmc-exynos.c
 index 4b76b997d..9b3141534 100644
 --- a/drivers/mmc/host/dw_mmc-exynos.c
@@ -394,8 +824,32 @@ index d734d0104..b4b00aaa2 100644
  	host->use_dma = SDMMC_GET_TRANS_MODE(mci_readl(host, HCON));
  	if (host->use_dma == DMA_INTERFACE_IDMA) {
  		host->use_dma = TRANS_MODE_IDMAC;
+diff --git a/drivers/phy/samsung/Kconfig b/drivers/phy/samsung/Kconfig
+index b7ab40290..1f9db9047 100644
+--- a/drivers/phy/samsung/Kconfig
++++ b/drivers/phy/samsung/Kconfig
+@@ -77,6 +77,19 @@ config PHY_S5PV210_USB2
+ 	  particular SoC is compiled in the driver. In case of S5PV210 two phys
+ 	  are available - device and host.
+ 
++config PHY_EXYNOS8895_USBDRD
++	tristate "Exynos8895 SoC USB DRD PHY driver"
++	depends on (ARCH_EXYNOS && OF) || COMPILE_TEST
++	depends on HAS_IOMEM
++	select GENERIC_PHY
++	select MFD_SYSCON
++	default ARCH_EXYNOS
++	help
++	  Enable USB DRD PHY support for the Exynos8895 SoC. The register
++	  layout matches the Exynos5 family but the bring-up sequence does
++	  not, so this is a separate driver rather than another variant of
++	  PHY_EXYNOS5_USBDRD.
++
+ config PHY_EXYNOS5_USBDRD
+ 	tristate "Exynos5 SoC series USB DRD PHY driver"
+ 	depends on (ARCH_EXYNOS && OF) || COMPILE_TEST
 diff --git a/drivers/phy/samsung/Makefile b/drivers/phy/samsung/Makefile
-index 342682638..4b017dbe7 100644
+index 342682638..c7910f762 100644
 --- a/drivers/phy/samsung/Makefile
 +++ b/drivers/phy/samsung/Makefile
 @@ -6,6 +6,7 @@ obj-$(CONFIG_PHY_SAMSUNG_UFS)		+= phy-exynos-ufs.o
@@ -406,6 +860,158 @@ index 342682638..4b017dbe7 100644
  phy-exynos-ufs-y			+= phy-exynosautov9-ufs.o
  phy-exynos-ufs-y			+= phy-exynosautov920-ufs.o
  phy-exynos-ufs-y			+= phy-fsd-ufs.o
+@@ -16,4 +17,5 @@ phy-exynos-usb2-$(CONFIG_PHY_EXYNOS4X12_USB2)	+= phy-exynos4x12-usb2.o
+ phy-exynos-usb2-$(CONFIG_PHY_EXYNOS5250_USB2)	+= phy-exynos5250-usb2.o
+ phy-exynos-usb2-$(CONFIG_PHY_S5PV210_USB2)	+= phy-s5pv210-usb2.o
+ obj-$(CONFIG_PHY_EXYNOS5_USBDRD)	+= phy-exynos5-usbdrd.o
++obj-$(CONFIG_PHY_EXYNOS8895_USBDRD)	+= phy-exynos8895-usbdrd.o
+ obj-$(CONFIG_PHY_EXYNOS5250_SATA)	+= phy-exynos5250-sata.o
+diff --git a/drivers/phy/samsung/phy-exynos5-usbdrd.c b/drivers/phy/samsung/phy-exynos5-usbdrd.c
+index 8711a3b62..2a9742596 100644
+--- a/drivers/phy/samsung/phy-exynos5-usbdrd.c
++++ b/drivers/phy/samsung/phy-exynos5-usbdrd.c
+@@ -63,6 +63,7 @@
+ #define LINKSYSTEM_XHCI_VERSION_CONTROL		BIT(27)
+ #define LINKSYSTEM_FORCE_VBUSVALID		BIT(8)
+ #define LINKSYSTEM_FORCE_BVALID			BIT(7)
++#define LINKSYSTEM_LINK_SW_RESET		BIT(28)
+ #define LINKSYSTEM_FLADJ			GENMASK(6, 1)
+ 
+ #define EXYNOS5_DRD_PHYUTMI			0x08
+@@ -152,6 +153,17 @@
+ #define PHYUTMICLKSEL_UTMI_CLKSEL		BIT(2)
+ 
+ #define EXYNOS5_DRD_PHYRESUME			0x34
++/*
++ * Q-Channel low power interface. When the block is left free to answer
++ * the Q-Channel handshake it can quiesce itself and its clocks stop,
++ * after which every controller command times out. Exynos8895 comes up
++ * that way, so the handshake has to be disabled and Q-active forced.
++ */
++#define PHYRESUME_DIS_LINKGATE_QACT		BIT(13)
++#define PHYRESUME_DIS_ID0_QACT			BIT(12)
++#define PHYRESUME_DIS_VBUSVALID_QACT		BIT(11)
++#define PHYRESUME_DIS_BVALID_QACT		BIT(10)
++#define PHYRESUME_FORCE_QACT			BIT(9)
+ 
+ #define EXYNOS5_DRD_LINKPORT			0x44
+ #define LINKPORT_HOST_U3_PORT_DISABLE		BIT(8)
+@@ -488,6 +500,25 @@ struct exynos5_usbdrd_phy_drvdata {
+ 	u32 pmu_offset_usbdrd0_phy;
+ 	u32 pmu_offset_usbdrd0_phy_ss;
+ 	u32 pmu_offset_usbdrd1_phy;
++	bool has_version_reg;
++	/*
++	 * Some SoCs must pick the PHY reference clock source through a
++	 * register that lives outside the PHY block itself. When set, the
++	 * second reg region is that register window and the three values
++	 * below describe the bit to set in it.
++	 */
++	bool has_refclk_sel;
++	bool needs_qch_force;
++	/*
++	 * Which source the PHY multiplier locks to. Most SoCs here use
++	 * EXT_REFCLK; Exynos8895 takes the core clock instead, which the
++	 * vendor calls CLKCORE and which happens to be the same encoding
++	 * as PAD_REFCLK.
++	 */
++	u32 refclksel;
++	u32 refclk_sel_offset;
++	u32 refclk_sel_mask;
++	u32 refclk_sel_value;
+ };
+ 
+ /**
+@@ -659,7 +690,9 @@ exynos5_usbdrd_utmi_set_refclk(struct phy_usb_instance *inst)
+ 	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYCLKRST);
+ 
+ 	reg &= ~PHYCLKRST_REFCLKSEL;
+-	reg |= FIELD_PREP(PHYCLKRST_REFCLKSEL, PHYCLKRST_REFCLKSEL_EXT_REFCLK);
++	reg |= FIELD_PREP(PHYCLKRST_REFCLKSEL,
++			  phy_drd->drv_data->refclksel ? :
++			  PHYCLKRST_REFCLKSEL_EXT_REFCLK);
+ 
+ 	reg &= ~(PHYCLKRST_FSEL_UTMI |
+ 		 PHYCLKRST_MPLL_MULTIPLIER |
+@@ -898,6 +931,31 @@ static int exynos5_usbdrd_phy_init(struct phy *phy)
+ 	writel(0x0, phy_drd->reg_phy + EXYNOS5_DRD_PHYREG0);
+ 	writel(0x0, phy_drd->reg_phy + EXYNOS5_DRD_PHYRESUME);
+ 
++	/*
++	 * Exynos8895 needs the Q-Channel handshake switched off before
++	 * anything else, otherwise the block quiesces, its clocks stop and
++	 * every controller command times out ("failed to enable ep0out").
++	 * The delays and the ordering are the vendor's: the disable bits
++	 * have to land before Q-active is forced.
++	 */
++	if (phy_drd->drv_data->needs_qch_force) {
++		reg = PHYRESUME_DIS_LINKGATE_QACT | PHYRESUME_DIS_ID0_QACT |
++		      PHYRESUME_DIS_VBUSVALID_QACT | PHYRESUME_DIS_BVALID_QACT;
++		udelay(500);
++		writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYRESUME);
++		udelay(500);
++		reg |= PHYRESUME_FORCE_QACT;
++		writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYRESUME);
++
++		/* Pulse the link out of reset so it picks the new state up. */
++		reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_LINKSYSTEM);
++		writel(reg | LINKSYSTEM_LINK_SW_RESET,
++		       phy_drd->reg_phy + EXYNOS5_DRD_LINKSYSTEM);
++		udelay(10);
++		writel(reg & ~LINKSYSTEM_LINK_SW_RESET,
++		       phy_drd->reg_phy + EXYNOS5_DRD_LINKSYSTEM);
++	}
++
+ 	/*
+ 	 * Setting the Frame length Adj value[6:1] to default 0x20
+ 	 * See xHCI 1.0 spec, 5.2.4
+@@ -2969,6 +3027,46 @@ static int exynos5_usbdrd_phy_probe(struct platform_device *pdev)
+ 			return PTR_ERR(phy_drd->reg_phy);
+ 	}
+ 
++	/*
++	 * Newer revisions of this block put a version register at offset 0
++	 * and shift the whole register map up by one word. On the older
++	 * SoCs offset 0 is reserved and reads back as zero, so probing for
++	 * it is safe: this mirrors what the vendor driver does.
++	 */
++	/*
++	 * Exynos8895 selects the PHY reference clock source outside the PHY
++	 * block. Without this the PHY comes up, the controller probes and a
++	 * UDC even appears - but the port never drives the bus, so the host
++	 * sees nothing at all. The vendor kernel does the same write from
++	 * its "usbphy-refclk" DT subnode.
++	 */
++	if (drv_data->has_refclk_sel) {
++		void __iomem *refclk;
++		u32 reg;
++
++		refclk = devm_platform_ioremap_resource(pdev, 1);
++		if (IS_ERR(refclk))
++			return dev_err_probe(dev, PTR_ERR(refclk),
++					     "failed to map refclk selector\n");
++
++		reg = readl(refclk + drv_data->refclk_sel_offset);
++		reg &= ~drv_data->refclk_sel_mask;
++		reg |= drv_data->refclk_sel_value;
++		writel(reg, refclk + drv_data->refclk_sel_offset);
++		dev_info(dev, "PHY refclk selector now %#x\n",
++			 readl(refclk + drv_data->refclk_sel_offset));
++	}
++
++	if (drv_data->has_version_reg) {
++		u32 version = readl(phy_drd->reg_phy);
++
++		if (version) {
++			dev_info(dev, "USBCON version %04x, registers shifted by 4\n",
++				 version);
++			phy_drd->reg_phy += 4;
++		}
++	}
++
+ 	/*
+ 	 * USB32DRD 4nm controller implements Synopsys eUSB2.0 PHY
+ 	 * and Synopsys SS/USBDP COMBOPHY, managed by external code.
 diff --git a/drivers/phy/samsung/phy-exynos8895-ufs.c b/drivers/phy/samsung/phy-exynos8895-ufs.c
 new file mode 100644
 index 000000000..c5a46cf86
@@ -586,6 +1192,432 @@ index 000000000..c5a46cf86
 +	.wait_for_cal = exynos8895_phy_wait_for_calibration,
 +	.wait_for_cdr = exynos8895_phy_wait_for_cdr_lock,
 +};
+diff --git a/drivers/phy/samsung/phy-exynos8895-usbdrd.c b/drivers/phy/samsung/phy-exynos8895-usbdrd.c
+new file mode 100644
+index 000000000..051b6c837
+--- /dev/null
++++ b/drivers/phy/samsung/phy-exynos8895-usbdrd.c
+@@ -0,0 +1,420 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung Exynos8895 USB DRD PHY driver
++ *
++ * The register layout matches the Exynos5433/7 USBCON block that
++ * phy-exynos5-usbdrd.c drives, but the bring-up sequence does not, and
++ * patching that driver one register at a time did not converge. Three
++ * separate vendor-only steps were tried there and none of them was
++ * enough on its own, so this is a faithful port of the vendor sequence
++ * instead (samsung_exynos_cal_usb3phy_enable() with version
++ * EXYNOS_USBCON_VER_01_1_1).
++ *
++ * The things this does that the generic driver never does:
++ *
++ *  - the block carries a version register at offset 0, which shifts the
++ *    whole register map up by one word;
++ *  - the Q-Channel handshake has to be switched off, otherwise the block
++ *    quiesces itself, its clocks stop and every controller command times
++ *    out with "failed to enable ep0out";
++ *  - there are TWO PHY register windows. Both must be taken out of
++ *    power-down together, given a millisecond, and only then may the
++ *    unused one be powered down again;
++ *  - the UTMI clock source is selected in PHYPIPE;
++ *  - the reference clock source is picked by a register outside the PHY
++ *    block entirely.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/phy/phy.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++
++#define EXYNOS8895_DRD_LINKSYSTEM		0x04
++#define LINKSYSTEM_LINK_SW_RESET		BIT(28)
++#define LINKSYSTEM_XHCI_VERSION_CONTROL		BIT(27)
++#define LINKSYSTEM_FORCE_VBUSVALID		BIT(8)
++#define LINKSYSTEM_FORCE_BVALID			BIT(7)
++#define LINKSYSTEM_FLADJ			GENMASK(6, 1)
++
++#define EXYNOS8895_DRD_PHYUTMI			0x08
++#define PHYUTMI_VBUSVLDEXTSEL			BIT(10)
++#define PHYUTMI_VBUSVLDEXT			BIT(9)
++#define PHYUTMI_OTGDISABLE			BIT(6)
++#define PHYUTMI_DRVVBUS				BIT(4)
++#define PHYUTMI_DPPULLDOWN			BIT(3)
++#define PHYUTMI_DMPULLDOWN			BIT(2)
++#define PHYUTMI_FORCESUSPEND			BIT(1)
++#define PHYUTMI_FORCESLEEP			BIT(0)
++
++#define EXYNOS8895_DRD_PHYPIPE			0x0c
++#define PHYPIPE_PHY_CLOCK_SEL			BIT(4)
++
++#define EXYNOS8895_DRD_PHYCLKRST		0x10
++#define PHYCLKRST_EN_UTMISUSPEND		BIT(31)
++#define PHYCLKRST_SSC_REFCLKSEL			GENMASK(30, 23)
++#define PHYCLKRST_SSC_RANGE			GENMASK(22, 21)
++#define PHYCLKRST_SSC_EN			BIT(20)
++#define PHYCLKRST_REF_SSP_EN			BIT(19)
++#define PHYCLKRST_REF_CLKDIV2			BIT(18)
++#define PHYCLKRST_MPLL_MULTIPLIER		GENMASK(17, 11)
++#define PHYCLKRST_FSEL				GENMASK(10, 5)
++#define PHYCLKRST_RETENABLEN			BIT(4)
++#define PHYCLKRST_REFCLKSEL			GENMASK(3, 2)
++#define PHYCLKRST_PORTRESET			BIT(1)
++#define PHYCLKRST_COMMONONN			BIT(0)
++
++#define EXYNOS8895_DRD_PHYREG0			0x14
++#define EXYNOS8895_DRD_PHYPARAM0		0x1c
++#define PHYPARAM0_REF_USE_PAD			BIT(31)
++
++#define EXYNOS8895_DRD_PHYTEST			0x28
++#define PHYTEST_POWERDOWN_SSP			BIT(3)
++#define PHYTEST_POWERDOWN_HSP			BIT(2)
++
++#define EXYNOS8895_DRD_PHYRESUME		0x34
++#define PHYRESUME_DIS_LINKGATE_QACT		BIT(13)
++#define PHYRESUME_DIS_ID0_QACT			BIT(12)
++#define PHYRESUME_DIS_VBUSVALID_QACT		BIT(11)
++#define PHYRESUME_DIS_BVALID_QACT		BIT(10)
++#define PHYRESUME_FORCE_QACT			BIT(9)
++
++#define EXYNOS8895_DRD_LINKPORT			0x44
++#define LINKPORT_HOST_U3_PORT_DISABLE		BIT(8)
++#define LINKPORT_HOST_PORT_OVCR_U3_SEL		BIT(3)
++#define LINKPORT_HOST_PORT_OVCR_U2_SEL		BIT(2)
++
++/* PMU register that isolates the PHY from the rest of the SoC. */
++#define EXYNOS8895_USBDRD_PHY_CONTROL		0x704
++#define PHY_CONTROL_ENABLE			BIT(0)
++
++/*
++ * Reference clock source selector. It sits in a register window of its
++ * own, outside the PHY block, and the vendor drives it from a separate
++ * "usbphy-refclk" DT subnode.
++ */
++#define EXYNOS8895_REFCLK_SEL_OFFSET		0x0c
++#define EXYNOS8895_REFCLK_SEL_BIT		BIT(24)
++
++/* The vendor calls this source CLKCORE; the encoding is 0x2. */
++#define EXYNOS8895_REFCLKSEL_CLKCORE		0x2
++
++/* FSEL encoding for the 26 MHz crystal this SoC is fitted with. */
++#define EXYNOS8895_FSEL_26MHZ			0x06
++
++struct exynos8895_usbdrd {
++	struct device *dev;
++	void __iomem *reg_phy;		/* first PHY window  */
++	void __iomem *reg_phy2;		/* second PHY window */
++	void __iomem *reg_refclk;
++	struct regmap *pmu;
++	struct clk *bus_clk;
++	struct clk *ref_clk;
++	struct phy *phy;
++};
++
++static void exynos8895_isolate(struct exynos8895_usbdrd *drd, bool isolate)
++{
++	regmap_update_bits(drd->pmu, EXYNOS8895_USBDRD_PHY_CONTROL,
++			   PHY_CONTROL_ENABLE, isolate ? 0 : PHY_CONTROL_ENABLE);
++}
++
++/*
++ * Left to itself the block answers the Q-Channel handshake, quiesces and
++ * stops its clocks. Every ordering detail here is the vendor's: the
++ * disable bits have to land, and settle, before Q-active is forced.
++ */
++static void exynos8895_force_qact(struct exynos8895_usbdrd *drd)
++{
++	u32 reg;
++
++	reg = readl(drd->reg_phy + EXYNOS8895_DRD_PHYRESUME);
++	reg |= PHYRESUME_DIS_ID0_QACT | PHYRESUME_DIS_VBUSVALID_QACT |
++	       PHYRESUME_DIS_BVALID_QACT | PHYRESUME_DIS_LINKGATE_QACT;
++	reg &= ~PHYRESUME_FORCE_QACT;
++	udelay(500);
++	writel(reg, drd->reg_phy + EXYNOS8895_DRD_PHYRESUME);
++	udelay(500);
++
++	reg = readl(drd->reg_phy + EXYNOS8895_DRD_PHYRESUME);
++	reg |= PHYRESUME_FORCE_QACT;
++	udelay(500);
++	writel(reg, drd->reg_phy + EXYNOS8895_DRD_PHYRESUME);
++
++	reg = readl(drd->reg_phy + EXYNOS8895_DRD_LINKSYSTEM);
++	writel(reg | LINKSYSTEM_LINK_SW_RESET,
++	       drd->reg_phy + EXYNOS8895_DRD_LINKSYSTEM);
++	udelay(10);
++	writel(reg & ~LINKSYSTEM_LINK_SW_RESET,
++	       drd->reg_phy + EXYNOS8895_DRD_LINKSYSTEM);
++}
++
++/*
++ * Both windows come out of power-down together and only then, after a
++ * millisecond, does the unused one go back down. Powering up just the
++ * window we use is not the same thing and does not work.
++ */
++static void exynos8895_power_up_phys(struct exynos8895_usbdrd *drd)
++{
++	u32 reg, reg2;
++
++	reg = readl(drd->reg_phy + EXYNOS8895_DRD_PHYTEST);
++	reg &= ~(PHYTEST_POWERDOWN_HSP | PHYTEST_POWERDOWN_SSP);
++	writel(reg, drd->reg_phy + EXYNOS8895_DRD_PHYTEST);
++
++	reg2 = readl(drd->reg_phy2 + EXYNOS8895_DRD_PHYTEST);
++	reg2 &= ~(PHYTEST_POWERDOWN_HSP | PHYTEST_POWERDOWN_SSP);
++	writel(reg2, drd->reg_phy2 + EXYNOS8895_DRD_PHYTEST);
++
++	udelay(1000);
++
++	/* We use port 0, so the second PHY goes back to sleep. */
++	reg2 |= PHYTEST_POWERDOWN_SSP | PHYTEST_POWERDOWN_HSP;
++	writel(reg2, drd->reg_phy2 + EXYNOS8895_DRD_PHYTEST);
++}
++
++static int exynos8895_usbdrd_init(struct phy *phy)
++{
++	struct exynos8895_usbdrd *drd = phy_get_drvdata(phy);
++	u32 reg, phyreg0;
++	int ret;
++
++	ret = clk_prepare_enable(drd->bus_clk);
++	if (ret)
++		return ret;
++
++	exynos8895_force_qact(drd);
++
++	reg = readl(drd->reg_phy + EXYNOS8895_DRD_PHYCLKRST);
++
++	/* Hold the port in reset while the clocking is set up. */
++	reg |= PHYCLKRST_PORTRESET;
++
++	reg &= ~PHYCLKRST_REFCLKSEL;
++	reg |= FIELD_PREP(PHYCLKRST_REFCLKSEL, EXYNOS8895_REFCLKSEL_CLKCORE);
++
++	reg &= ~PHYCLKRST_FSEL;
++	reg |= FIELD_PREP(PHYCLKRST_FSEL, EXYNOS8895_FSEL_26MHZ);
++
++	/* Common block stays alive in suspend, and the link does not gate it. */
++	reg &= ~PHYCLKRST_COMMONONN;
++	reg &= ~PHYCLKRST_EN_UTMISUSPEND;
++
++	/* Normal (not retention) digital supply mode, and the SS ref clock. */
++	reg |= PHYCLKRST_RETENABLEN;
++	reg |= PHYCLKRST_REF_SSP_EN;
++
++	/* Spread spectrum on, default range, as the vendor leaves it. */
++	reg |= PHYCLKRST_SSC_EN;
++	reg &= ~PHYCLKRST_SSC_RANGE;
++
++	phyreg0 = readl(drd->reg_phy + EXYNOS8895_DRD_PHYREG0);
++
++	/* The reference comes from inside the SoC, not off a pad. */
++	writel(readl(drd->reg_phy + EXYNOS8895_DRD_PHYPARAM0) &
++	       ~PHYPARAM0_REF_USE_PAD,
++	       drd->reg_phy + EXYNOS8895_DRD_PHYPARAM0);
++
++	/* UTMI runs off the free-running clock rather than the PHY clock. */
++	writel(readl(drd->reg_phy + EXYNOS8895_DRD_PHYPIPE) |
++	       PHYPIPE_PHY_CLOCK_SEL,
++	       drd->reg_phy + EXYNOS8895_DRD_PHYPIPE);
++
++	writel(phyreg0, drd->reg_phy + EXYNOS8895_DRD_PHYREG0);
++
++	writel(reg, drd->reg_phy + EXYNOS8895_DRD_PHYCLKRST);
++	udelay(10);
++	reg &= ~PHYCLKRST_PORTRESET;
++	writel(reg, drd->reg_phy + EXYNOS8895_DRD_PHYCLKRST);
++
++	exynos8895_power_up_phys(drd);
++	udelay(500);
++
++	/*
++	 * There is no VBUS sense pad wired up on this board, so the link is
++	 * told the bus is valid and the PHY takes the session valid signal
++	 * from the register rather than from the (absent) comparator.
++	 */
++	reg = readl(drd->reg_phy + EXYNOS8895_DRD_LINKSYSTEM);
++	reg |= LINKSYSTEM_XHCI_VERSION_CONTROL;
++	reg &= ~LINKSYSTEM_FLADJ;
++	reg |= FIELD_PREP(LINKSYSTEM_FLADJ, 0x20);
++	reg |= LINKSYSTEM_FORCE_BVALID | LINKSYSTEM_FORCE_VBUSVALID;
++	writel(reg, drd->reg_phy + EXYNOS8895_DRD_LINKSYSTEM);
++
++	reg = readl(drd->reg_phy + EXYNOS8895_DRD_PHYUTMI);
++	reg &= ~(PHYUTMI_FORCESLEEP | PHYUTMI_FORCESUSPEND);
++	reg &= ~(PHYUTMI_DMPULLDOWN | PHYUTMI_DPPULLDOWN);
++	reg |= PHYUTMI_VBUSVLDEXTSEL | PHYUTMI_VBUSVLDEXT;
++	/* Device mode: no OTG block, and we never drive VBUS ourselves. */
++	reg &= ~PHYUTMI_DRVVBUS;
++	reg |= PHYUTMI_OTGDISABLE;
++	writel(reg, drd->reg_phy + EXYNOS8895_DRD_PHYUTMI);
++
++	reg = readl(drd->reg_phy + EXYNOS8895_DRD_LINKPORT);
++	reg |= LINKPORT_HOST_PORT_OVCR_U3_SEL | LINKPORT_HOST_PORT_OVCR_U2_SEL;
++	reg &= ~LINKPORT_HOST_U3_PORT_DISABLE;
++	writel(reg, drd->reg_phy + EXYNOS8895_DRD_LINKPORT);
++
++	return 0;
++}
++
++static int exynos8895_usbdrd_exit(struct phy *phy)
++{
++	struct exynos8895_usbdrd *drd = phy_get_drvdata(phy);
++	u32 reg;
++
++	reg = readl(drd->reg_phy + EXYNOS8895_DRD_PHYUTMI);
++	reg |= PHYUTMI_FORCESUSPEND | PHYUTMI_FORCESLEEP;
++	writel(reg, drd->reg_phy + EXYNOS8895_DRD_PHYUTMI);
++
++	reg = readl(drd->reg_phy + EXYNOS8895_DRD_PHYTEST);
++	reg |= PHYTEST_POWERDOWN_HSP | PHYTEST_POWERDOWN_SSP;
++	writel(reg, drd->reg_phy + EXYNOS8895_DRD_PHYTEST);
++
++	clk_disable_unprepare(drd->bus_clk);
++
++	return 0;
++}
++
++static int exynos8895_usbdrd_power_on(struct phy *phy)
++{
++	struct exynos8895_usbdrd *drd = phy_get_drvdata(phy);
++	int ret;
++
++	ret = clk_prepare_enable(drd->ref_clk);
++	if (ret)
++		return ret;
++
++	exynos8895_isolate(drd, false);
++
++	return 0;
++}
++
++static int exynos8895_usbdrd_power_off(struct phy *phy)
++{
++	struct exynos8895_usbdrd *drd = phy_get_drvdata(phy);
++
++	exynos8895_isolate(drd, true);
++	clk_disable_unprepare(drd->ref_clk);
++
++	return 0;
++}
++
++static const struct phy_ops exynos8895_usbdrd_ops = {
++	.init		= exynos8895_usbdrd_init,
++	.exit		= exynos8895_usbdrd_exit,
++	.power_on	= exynos8895_usbdrd_power_on,
++	.power_off	= exynos8895_usbdrd_power_off,
++	.owner		= THIS_MODULE,
++};
++
++static struct phy *exynos8895_usbdrd_xlate(struct device *dev,
++					   const struct of_phandle_args *args)
++{
++	struct exynos8895_usbdrd *drd = dev_get_drvdata(dev);
++
++	/*
++	 * Only the USB 2.0 side is brought up here, and both cells map to
++	 * it. USB 3.0 needs the PIPE3 block, which has a calibration table
++	 * of its own and buys nothing for a network gadget.
++	 */
++	return drd->phy;
++}
++
++static int exynos8895_usbdrd_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct exynos8895_usbdrd *drd;
++	struct phy_provider *provider;
++	u32 version, reg;
++
++	drd = devm_kzalloc(dev, sizeof(*drd), GFP_KERNEL);
++	if (!drd)
++		return -ENOMEM;
++
++	drd->dev = dev;
++	platform_set_drvdata(pdev, drd);
++
++	drd->reg_phy = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(drd->reg_phy))
++		return PTR_ERR(drd->reg_phy);
++
++	drd->reg_phy2 = devm_platform_ioremap_resource(pdev, 1);
++	if (IS_ERR(drd->reg_phy2))
++		return dev_err_probe(dev, PTR_ERR(drd->reg_phy2),
++				     "second PHY window is required\n");
++
++	drd->reg_refclk = devm_platform_ioremap_resource(pdev, 2);
++	if (IS_ERR(drd->reg_refclk))
++		return dev_err_probe(dev, PTR_ERR(drd->reg_refclk),
++				     "refclk selector window is required\n");
++
++	drd->bus_clk = devm_clk_get(dev, "phy");
++	if (IS_ERR(drd->bus_clk))
++		return dev_err_probe(dev, PTR_ERR(drd->bus_clk),
++				     "no bus clock\n");
++
++	drd->ref_clk = devm_clk_get(dev, "ref");
++	if (IS_ERR(drd->ref_clk))
++		return dev_err_probe(dev, PTR_ERR(drd->ref_clk),
++				     "no reference clock\n");
++
++	drd->pmu = syscon_regmap_lookup_by_phandle(dev->of_node,
++						   "samsung,pmu-syscon");
++	if (IS_ERR(drd->pmu))
++		return dev_err_probe(dev, PTR_ERR(drd->pmu),
++				     "failed to look up PMU regmap\n");
++
++	/* Point the PHY multiplier at the on-chip reference. */
++	reg = readl(drd->reg_refclk + EXYNOS8895_REFCLK_SEL_OFFSET);
++	reg |= EXYNOS8895_REFCLK_SEL_BIT;
++	writel(reg, drd->reg_refclk + EXYNOS8895_REFCLK_SEL_OFFSET);
++
++	/*
++	 * A non-zero word at offset 0 is the block version, and it means
++	 * every other register sits one word further along. Both windows
++	 * shift together.
++	 */
++	version = readl(drd->reg_phy);
++	if (version) {
++		drd->reg_phy += 4;
++		drd->reg_phy2 += 4;
++		dev_info(dev, "USBCON version %#x, registers shifted by 4\n",
++			 version);
++	}
++
++	drd->phy = devm_phy_create(dev, NULL, &exynos8895_usbdrd_ops);
++	if (IS_ERR(drd->phy))
++		return dev_err_probe(dev, PTR_ERR(drd->phy),
++				     "failed to create PHY\n");
++	phy_set_drvdata(drd->phy, drd);
++
++	provider = devm_of_phy_provider_register(dev, exynos8895_usbdrd_xlate);
++
++	return PTR_ERR_OR_ZERO(provider);
++}
++
++static const struct of_device_id exynos8895_usbdrd_of_match[] = {
++	{ .compatible = "samsung,exynos8895-usbdrd-phy" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, exynos8895_usbdrd_of_match);
++
++static struct platform_driver exynos8895_usbdrd_driver = {
++	.probe	= exynos8895_usbdrd_probe,
++	.driver	= {
++		.name		= "exynos8895-usbdrd-phy",
++		.of_match_table	= exynos8895_usbdrd_of_match,
++	},
++};
++module_platform_driver(exynos8895_usbdrd_driver);
++
++MODULE_DESCRIPTION("Samsung Exynos8895 USB DRD PHY driver");
++MODULE_LICENSE("GPL");
 diff --git a/drivers/phy/samsung/phy-samsung-ufs.c b/drivers/phy/samsung/phy-samsung-ufs.c
 index ee665f26c..bda597014 100644
 --- a/drivers/phy/samsung/phy-samsung-ufs.c
@@ -1020,6 +2052,64 @@ index abe7e4727..8305aee15 100644
  };
  
  #define for_each_ufs_rx_lane(ufs, i) \
+diff --git a/drivers/usb/dwc3/dwc3-exynos.c b/drivers/usb/dwc3/dwc3-exynos.c
+index e934f94e8..abdf2cef1 100644
+--- a/drivers/usb/dwc3/dwc3-exynos.c
++++ b/drivers/usb/dwc3/dwc3-exynos.c
+@@ -163,6 +163,17 @@ static const struct dwc3_exynos_driverdata exynos5433_drvdata = {
+ 	.suspend_clk_idx = 1,
+ };
+ 
++/*
++ * Exynos8895 wires three gates to the controller in CMU_FSYS0: the bus
++ * clock, the suspend clock and the reference clock. Names follow the
++ * bindings rather than the vendor tree, which calls them by SFR names.
++ */
++static const struct dwc3_exynos_driverdata exynos8895_drvdata = {
++	.clk_names = { "aclk", "susp_clk", "ref_clk" },
++	.num_clks = 3,
++	.suspend_clk_idx = 1,
++};
++
+ static const struct dwc3_exynos_driverdata exynos7_drvdata = {
+ 	.clk_names = { "usbdrd30", "usbdrd30_susp_clk", "usbdrd30_axius_clk" },
+ 	.num_clks = 3,
+@@ -203,6 +214,9 @@ static const struct of_device_id exynos_dwc3_match[] = {
+ 	}, {
+ 		.compatible = "samsung,exynos5433-dwusb3",
+ 		.data = &exynos5433_drvdata,
++	}, {
++		.compatible = "samsung,exynos8895-dwusb3",
++		.data = &exynos8895_drvdata,
+ 	}, {
+ 		.compatible = "samsung,exynos7-dwusb3",
+ 		.data = &exynos7_drvdata,
+diff --git a/include/dt-bindings/clock/samsung,exynos8895.h b/include/dt-bindings/clock/samsung,exynos8895.h
+index 27998c53f..0f8016d8e 100644
+--- a/include/dt-bindings/clock/samsung,exynos8895.h
++++ b/include/dt-bindings/clock/samsung,exynos8895.h
+@@ -450,4 +450,21 @@
+ #define CLK_GOUT_PERIC1_USI13_I_SCLK_USI		63
+ #define CLK_GOUT_PERIC1_XIU_P_PERIC1_ACLK		64
+ 
++/* CMU_G3D */
++#define CLK_FOUT_G3D_PLL				1
++#define CLK_MOUT_G3D_SWITCH_USER			2
++#define CLK_MOUT_G3D_BUSD				3
++#define CLK_DOUT_G3D_BUSP				4
++#define CLK_GOUT_G3D_CMU_G3D_PCLK			5
++#define CLK_GOUT_G3D_AGPU				6
++#define CLK_GOUT_G3D_AXI2APB_G3D_ACLK			7
++#define CLK_GOUT_G3D_BUSIF_HPMG3D_PCLK			8
++#define CLK_GOUT_G3D_HPM_G3D_TARGETCLK			9
++#define CLK_GOUT_G3D_LHM_AXI_P_G3D_I_CLK		10
++#define CLK_GOUT_G3D_LHS_AXI_G3DSFR_I_CLK		11
++#define CLK_GOUT_G3D_PMU_G3D_PCLK			12
++#define CLK_GOUT_G3D_RSTNSYNC_CLK_G3D_BUSP_CLK		13
++#define CLK_GOUT_G3D_SYSREG_G3D_PCLK			14
++#define CLK_GOUT_G3D_XIU_P_G3D_ACLK			15
++
+ #endif /* _DT_BINDINGS_CLOCK_EXYNOS8895_H */
 diff --git a/include/ufs/ufshcd.h b/include/ufs/ufshcd.h
 index 248d0a5be..7982846a9 100644
 --- a/include/ufs/ufshcd.h
