@@ -174,6 +174,42 @@ def run_detached(cmd, env_extra=None):
         return str(exc)
 
 
+def phoc_env():
+    """Переменные, с которыми реально запущен композитор.
+
+    Читаются из /proc, а не из конфигов: конфиг говорит, что мы хотели, а
+    /proc — что получилось.
+    """
+    keep = ("PAN_MESA_DEBUG", "WLR_RENDERER", "WLR_DRM_DEVICES",
+            "WLR_RENDER_DRM_DEVICE", "GSK_RENDERER")
+    try:
+        pid = subprocess.run(["pgrep", "-x", "phoc"], capture_output=True,
+                             text=True, timeout=10).stdout.split()[0]
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            raw = fh.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return {"(не прочитать)": "phoc не найден или нет доступа"}
+    out = {}
+    for item in raw.split("\0"):
+        k, _, v = item.partition("=")
+        if k in keep:
+            out[k] = v
+    return out or {"(ничего из наших)": "переменные не заданы"}
+
+
+def phoc_scale():
+    try:
+        with open("/etc/phosh/phoc.ini") as fh:
+            tail = fh.read().rsplit("[output:Unknown-1]", 1)
+        if len(tail) == 2:
+            for ln in tail[1].splitlines():
+                if ln.strip().startswith("scale"):
+                    return ln.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return "не задан"
+
+
 def read_first(path, default="?"):
     try:
         with open(path) as fh:
@@ -341,11 +377,42 @@ class Lab(Gtk.Window):
         self._fps_t0 = 0
         self._phase = 0.0
 
+        mb = Gtk.Button(label="Замер копии кадра в памяти")
+        mb.set_size_request(-1, 80)
+        big(mb.get_child(), 1.15)
+        mb.connect("clicked", self._measure_copy)
+        box.pack_start(mb, False, False, 4)
+
         self.canvas = Gtk.DrawingArea()
         self.canvas.connect("draw", self._draw_frame)
         box.pack_start(self.canvas, True, True, 0)
         self.canvas.add_tick_callback(self._tick)
         return box
+
+    def _measure_copy(self, _btn):
+        """Сколько стоит один полный проход по кадру в обычной памяти.
+
+        Нужно для арифметики: наблюдаемые 48 мс на полноэкранный кадр надо
+        с чем-то соизмерить. Если один проход стоит X, то 48 мс это 48/X
+        проходов — и тогда видно, ищем мы один просчёт или сумму нескольких
+        неизбежных копий.
+
+        memmove из libc, то есть ровно тот memcpy, которым копируют все
+        остальные. Barrier не нужен: ctypes всё равно не оптимизируется.
+        """
+        import ctypes
+        import time
+        n = 1440 * 2960 * 4
+        a = ctypes.create_string_buffer(n)
+        b = ctypes.create_string_buffer(n)
+        ctypes.memmove(b, a, n)                     # прогрев
+        t0 = time.monotonic()
+        reps = 10
+        for _ in range(reps):
+            ctypes.memmove(b, a, n)
+        dt = (time.monotonic() - t0) / reps
+        self.say("кадр %.1f МБ: один проход по памяти %.1f мс (%.0f МБ/с)"
+                 % (n / 1048576.0, dt * 1e3, n / 1048576.0 / dt))
 
     def _on_frame_mode(self, btn, mode):
         if btn.get_active():
@@ -626,6 +693,14 @@ class Lab(Gtk.Window):
             lines.append(f"Сбросов GPU по таймауту: {n}")
         except Exception:  # noqa: BLE001
             lines.append("Сбросов GPU: нет доступа к dmesg")
+
+        # Без этого невозможно отличить "версия не подтвердилась" от
+        # "настройка не доехала до композитора". На переключении текстур
+        # в линейные я упёрся ровно в это.
+        lines.append("Композитор сейчас работает с:")
+        for k, v in sorted(phoc_env().items()):
+            lines.append(f"  {k}={v}")
+        lines.append(f"Масштаб в phoc.ini: {phoc_scale()}")
 
         lines.append(f"Выбрано для запуска: {self.renderer_name}")
         for k, v in sorted(self.renderer.items()):
