@@ -309,9 +309,10 @@ class Lab(Gtk.Window):
 
         self.fps_label = Gtk.Label(label="кадров/с: —")
         self.fps_label.set_xalign(0)
+        self.fps_label.set_line_wrap(True)
         box.pack_start(big(self.fps_label, 1.8), False, False, 4)
 
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         first = None
         for label, mode in FRAME_MODES:
             btn = Gtk.RadioButton.new_with_label_from_widget(first, label)
@@ -319,7 +320,7 @@ class Lab(Gtk.Window):
                 first = btn
             btn.connect("toggled", self._on_frame_mode, mode)
             big(btn, 1.1)
-            row.pack_start(btn, True, True, 0)
+            row.pack_start(btn, False, False, 0)
         box.pack_start(row, False, False, 0)
 
         self.frame_mode = FRAME_MODES[0][1]
@@ -347,7 +348,7 @@ class Lab(Gtk.Window):
         dt = now - self._fps_t0
         if dt >= 1000000:
             self.fps_label.set_text(
-                "кадров/с: %.1f   (%.1f мс на кадр)"
+                "%.1f кадр/с\n%.1f мс на кадр"
                 % (self._fps_n * 1e6 / dt, dt / 1000.0 / self._fps_n))
             self._fps_n = 0
             self._fps_t0 = now
@@ -541,7 +542,7 @@ class Lab(Gtk.Window):
             btn.set_size_request(-1, 88)
             big(btn.get_child(), 1.25)
             btn.connect("clicked", fn)
-            row.pack_start(btn, True, True, 0)
+            row.pack_start(btn, False, False, 0)
 
         box.pack_start(row, False, False, 0)
         box.pack_start(scroll, True, True, 0)
