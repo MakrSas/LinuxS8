@@ -31,7 +31,10 @@ fi
 echo "контроллер: $UDC"
 
 if [ -d "$GADGET" ]; then
-	echo "" > "$GADGET/UDC" 2>/dev/null || true
+	# Отвязка: пока гаджет привязан, ядро отвергает любые изменения.
+	# Ошибку не глушим — молчаливое "|| true" уже один раз спрятало
+	# от нас настоящую причину.
+	echo "" > "$GADGET/UDC" || echo "  (гаджет и так не был привязан)"
 else
 	mkdir -p "$GADGET"
 fi
@@ -52,11 +55,25 @@ mkdir -p configs/c.1/strings/0x409
 echo "CDC ECM" > configs/c.1/strings/0x409/configuration
 echo 250       > configs/c.1/MaxPower
 
-mkdir -p functions/ecm.usb0
-echo "$MAC_HOST" > functions/ecm.usb0/host_addr
-echo "$MAC_DEV"  > functions/ecm.usb0/dev_addr
+# MAC пишется только при создании функции. Как только функция подключена
+# к конфигурации, ядро держит на неё ссылку и отвергает запись с EBUSY —
+# на повторном запуске скрипт на этом и спотыкался.
+if [ ! -d functions/ecm.usb0 ]; then
+	mkdir -p functions/ecm.usb0
+	echo "$MAC_HOST" > functions/ecm.usb0/host_addr
+	echo "$MAC_DEV"  > functions/ecm.usb0/dev_addr
+fi
 
-ln -sf ../../../functions/ecm.usb0 configs/c.1/ 2>/dev/null || true
+# Путь ссылки configfs разбирает ОТНОСИТЕЛЬНО текущего каталога процесса,
+# а не относительно места самой ссылки. Мы стоим в каталоге гаджета, значит
+# писать надо ровно "functions/...". Первая версия писала сюда
+# ../../../functions/... и промахивалась на уровень; ошибка при этом
+# глушилась через 2>/dev/null, поэтому скрипт рапортовал успех, а гаджет
+# потом не привязывался с -EINVAL: у конфигурации не было ни одной функции.
+if [ ! -e configs/c.1/ecm.usb0 ]; then
+	ln -s functions/ecm.usb0 configs/c.1/ecm.usb0
+fi
+[ -e configs/c.1/ecm.usb0 ] || { echo "функция не привязалась к конфигурации" >&2; exit 1; }
 
 echo "$UDC" > UDC
 echo "гаджет привязан к $UDC"
