@@ -227,7 +227,6 @@ class Lab(Gtk.Window):
 
         stack = self.stack = Gtk.Stack()
         stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
-        switcher = Gtk.StackSwitcher(stack=stack)
 
         stack.add_titled(self._apps_page(), "apps", "Приложения")
         stack.add_titled(self._frames_page(), "frames", "Кадры")
@@ -236,6 +235,21 @@ class Lab(Gtk.Window):
         stack.add_titled(self._log_page(), "logs", "Журнал")
         stack.add_titled(self._shell_page(), "shell", "Оболочка")
         stack.add_titled(self._info_page(), "info", "Состояние")
+
+        # Не StackSwitcher: он выкладывает вкладки в одну строку, а страниц
+        # семь. При масштабе 2 ему нужно больше, чем даёт экран, и последние
+        # вкладки — "Оболочка" и "Состояние" — просто уезжали за край, где
+        # до них было не дотянуться. Список влезает при любом масштабе.
+        switcher = Gtk.ComboBoxText()
+        for page in stack.get_children():
+            switcher.append(stack.child_get_property(page, "name"),
+                            stack.child_get_property(page, "title"))
+        switcher.set_active(0)
+        switcher.connect(
+            "changed",
+            lambda cb: stack.set_visible_child_name(cb.get_active_id()))
+        for cell in switcher.get_cells():
+            cell.set_property("scale", 1.3)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.pack_start(switcher, False, False, 6)
