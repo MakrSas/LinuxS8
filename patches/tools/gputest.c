@@ -29,8 +29,9 @@
 #include <string.h>
 #include <time.h>
 
-#define W 512
-#define H 512
+/* Размер по умолчанию; переопределяется аргументами. */
+static int W = 512;
+static int H = 512;
 
 static double now_sec(void)
 {
@@ -96,6 +97,16 @@ int main(int argc, char **argv)
 {
 	int frames = (argc > 1) ? atoi(argv[1]) : 200;
 	int iters = (argc > 2) ? atoi(argv[2]) : 64;
+	if (argc > 3) W = atoi(argv[3]);
+	if (argc > 4) H = atoi(argv[4]);
+	/*
+	 * Пятым аргументом — сколько кадров читать обратно в память.
+	 * Ноль отключает эту часть совсем: чтение идёт со скоростью около
+	 * 26 МБ/с и на больших буферах занимает секунды, полностью
+	 * забивая замер. Когда проверяем правильность, а не скорость
+	 * копии, оно только мешает.
+	 */
+	int rframes = (argc > 5) ? atoi(argv[5]) : -1;
 
 	/* ---- EGL без всякого дисплея ---- */
 	EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -184,17 +195,36 @@ int main(int argc, char **argv)
 	glDrawArrays(GL_TRIANGLES, 0, 6);
 	glFinish();
 
-	/* ---- проверка правильности ---- */
-	unsigned char px[4] = {0};
-	glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-	printf("\nпиксель в центре: R=%u G=%u B=%u A=%u (ждём ~64 128 191 255)\n",
-	       px[0], px[1], px[2], px[3]);
-
-	int sane = (abs((int)px[1] - 128) <= 2) && (abs((int)px[2] - 191) <= 2) &&
-		   (px[3] == 255);
+	/*
+	 * Проверка правильности в пяти точках, а не в одной.
+	 *
+	 * Одной точки мало: по ней не отличить "весь кадр испорчен" от
+	 * "испорчена часть". А это разные диагнозы — второе указывает на
+	 * работу с тайлами или с крупными буферами, первое на что-то общее.
+	 */
+	static const char *pt_name[5] = { "центр", "лев.верх", "прав.верх",
+					  "лев.низ", "прав.низ" };
+	int pt[5][2] = {
+		{ W / 2, H / 2 },
+		{ W / 8, H - H / 8 }, { W - W / 8, H - H / 8 },
+		{ W / 8, H / 8 },     { W - W / 8, H / 8 },
+	};
+	int sane = 1;
+	printf("\nпроверка пикселей (ждём G=128 B=191 A=255):\n");
+	for (int i = 0; i < 5; i++) {
+		unsigned char px[4] = {0};
+		glReadPixels(pt[i][0], pt[i][1], 1, 1, GL_RGBA,
+			     GL_UNSIGNED_BYTE, px);
+		int ok_pt = (abs((int)px[1] - 128) <= 2) &&
+			    (abs((int)px[2] - 191) <= 2) && (px[3] == 255);
+		printf("  %-10s R=%3u G=%3u B=%3u A=%3u  %s\n", pt_name[i],
+		       px[0], px[1], px[2], px[3], ok_pt ? "ок" : "МИМО");
+		if (!ok_pt)
+			sane = 0;
+	}
 	printf("рисование %s\n",
-	       sane ? "ПОДТВЕРЖДЕНО (пиксели совпали)"
-		    : "НЕ ПОДТВЕРЖДЕНО (пиксели не те)");
+	       sane ? "ПОДТВЕРЖДЕНО (все точки совпали)"
+		    : "НЕ ПОДТВЕРЖДЕНО");
 
 	/* ---- замер ---- */
 	double t0 = now_sec();
@@ -210,6 +240,40 @@ int main(int argc, char **argv)
 	printf("время      : %.3f с\n", dt);
 	printf("кадров/с   : %.1f\n", frames / dt);
 	printf("Мпикс/с    : %.1f\n", mpix / dt);
+
+	/*
+	 * Отдельно меряем ЧТЕНИЕ кадра обратно в память процессора.
+	 *
+	 * Это не абстрактный тест: ровно это приходится делать композитору
+	 * на каждом кадре. У simpledrm нет импорта буферов GPU, поэтому
+	 * готовый кадр надо вычитать и переложить в буфер кадра. На тайловом
+	 * GPU операция дорогая — полный сброс конвейера плюс распаковка
+	 * тайлов. Если она окажется соизмерима с 16 мс, то потолок в 60
+	 * кадров недостижим в принципе, сколько бы ни было GPU.
+	 */
+	if (rframes < 0)
+		rframes = frames / 4 + 1;
+	unsigned char *buf = rframes > 0 ? malloc((size_t)W * H * 4) : NULL;
+	if (buf) {
+		glFinish();
+		t0 = now_sec();
+		for (int i = 0; i < rframes; i++) {
+			glClear(GL_COLOR_BUFFER_BIT);
+			glDrawArrays(GL_TRIANGLES, 0, 6);
+			glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+		}
+		glFinish();
+		double dtr = now_sec() - t0;
+		printf("\nтеперь то же самое, но с чтением кадра в память:\n");
+		printf("кадров     : %d\n", rframes);
+		printf("время      : %.3f с\n", dtr);
+		printf("кадров/с   : %.1f\n", rframes / dtr);
+		printf("на кадр    : %.1f мс (из них рисование ~%.1f мс)\n",
+		       1000.0 * dtr / rframes, 1000.0 * dt / frames);
+		printf("объём      : %.1f МБ на кадр\n",
+		       (double)W * H * 4 / 1048576.0);
+		free(buf);
+	}
 
 	GLenum err = glGetError();
 	if (err != GL_NO_ERROR)

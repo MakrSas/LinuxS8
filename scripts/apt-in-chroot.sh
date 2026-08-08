@@ -25,11 +25,19 @@
 set -e
 
 SUITE=""
-if [ "${1:-}" = "--suite" ]; then
-	SUITE="$2"; shift 2
-fi
+# По умолчанию ставим без Recommends: на телефоне место и время дороги.
+# Но некоторым пакетам рекомендации нужны по существу — у phosh это
+# экранная клавиатура, без неё оболочка бесполезна.
+RECOMMENDS="--no-install-recommends"
+while true; do
+	case "${1:-}" in
+	--suite)      SUITE="$2"; shift 2 ;;
+	--recommends) RECOMMENDS=""; shift ;;
+	*)            break ;;
+	esac
+done
 
-[ $# -gt 0 ] || { echo "укажите пакеты: $0 [--suite <suite>] mesa-utils ..." >&2; exit 1; }
+[ $# -gt 0 ] || { echo "укажите пакеты: $0 [--suite <suite>] [--recommends] mesa-utils ..." >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ADB="$ROOT/build/tools/platform-tools/adb"
@@ -117,7 +125,7 @@ echo ">> apt-get install $*"
 "$ADB" shell "chroot $ROOT_MNT /usr/bin/env -i \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   HOME=/root TERM=dumb DEBIAN_FRONTEND=noninteractive \
-  apt-get install -y --no-install-recommends ${SUITE:+-t $SUITE} $*" 2>&1 | tail -25
+  apt-get install -y $RECOMMENDS ${SUITE:+-t $SUITE} $*" 2>&1 | tail -25
 
 "$ADB" shell "sync"
 echo ">> готово"
