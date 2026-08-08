@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Лаборатория dreamlte
+Comment=Запуск приложений с разными отрисовщиками и смена оболочки
+Exec=/usr/local/bin/dreamlte-lab
+Icon=applications-engineering
+Terminal=false
+Categories=System;Settings;
+Keywords=lab;gpu;renderer;shell;

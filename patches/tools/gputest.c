@@ -23,6 +23,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +108,21 @@ int main(int argc, char **argv)
 	 * копии, оно только мешает.
 	 */
 	int rframes = (argc > 5) ? atoi(argv[5]) : -1;
+	/*
+	 * Шестым аргументом — цель рисования:
+	 *   0  RGBA8888 в текстуре
+	 *   1  RGB565 в renderbuffer
+	 *   2  RGBA8 в renderbuffer (нужен OES_rgb8_rgba8)
+	 *
+	 * Вариант 2 добавлен, чтобы сравнение было честным. В прошлый раз
+	 * я менял разом и формат, и тип вложения (текстура против
+	 * renderbuffer) — и разница вдвое могла быть про что угодно из
+	 * двух. Теперь формат можно менять при одном типе вложения, а тип
+	 * при одном формате.
+	 */
+	int target = (argc > 6) ? atoi(argv[6]) : 0;
+	int fmt565 = (target == 1);
+	int use_rb = (target != 0);
 
 	/* ---- EGL без всякого дисплея ---- */
 	EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -149,18 +165,38 @@ int main(int argc, char **argv)
 	printf("GLSL        : %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
 
 	/* ---- цель рисования ---- */
-	GLuint tex, fbo;
-	glGenTextures(1, &tex);
-	glBindTexture(GL_TEXTURE_2D, tex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA,
-		     GL_UNSIGNED_BYTE, NULL);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
+	GLuint fbo;
 	glGenFramebuffers(1, &fbo);
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-			       GL_TEXTURE_2D, tex, 0);
+
+	printf("цель        : %s, %s (%d байта на пиксель)\n",
+	       fmt565 ? "RGB565" : "RGBA8888",
+	       use_rb ? "renderbuffer" : "текстура", fmt565 ? 2 : 4);
+
+	if (use_rb) {
+		/*
+		 * Через renderbuffer, а не текстуру: GLES2 гарантирует
+		 * RGB565 renderable именно для renderbuffer, а для
+		 * текстуры это на усмотрение реализации.
+		 */
+		GLuint rb;
+		glGenRenderbuffers(1, &rb);
+		glBindRenderbuffer(GL_RENDERBUFFER, rb);
+		glRenderbufferStorage(GL_RENDERBUFFER,
+				      fmt565 ? GL_RGB565 : GL_RGBA8_OES, W, H);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+					  GL_RENDERBUFFER, rb);
+	} else {
+		GLuint tex;
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA,
+			     GL_UNSIGNED_BYTE, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+				       GL_TEXTURE_2D, tex, 0);
+	}
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
 		die("FBO неполон");
 
@@ -215,8 +251,14 @@ int main(int argc, char **argv)
 		unsigned char px[4] = {0};
 		glReadPixels(pt[i][0], pt[i][1], 1, 1, GL_RGBA,
 			     GL_UNSIGNED_BYTE, px);
-		int ok_pt = (abs((int)px[1] - 128) <= 2) &&
-			    (abs((int)px[2] - 191) <= 2) && (px[3] == 255);
+		/*
+		 * У RGB565 на канал приходится 5-6 бит, поэтому значения
+		 * возвращаются округлёнными. Допуск расширен ровно на
+		 * величину этого округления, а не "на всякий случай".
+		 */
+		int tol = fmt565 ? 8 : 2;
+		int ok_pt = (abs((int)px[1] - 128) <= tol) &&
+			    (abs((int)px[2] - 191) <= tol) && (px[3] == 255);
 		printf("  %-10s R=%3u G=%3u B=%3u A=%3u  %s\n", pt_name[i],
 		       px[0], px[1], px[2], px[3], ok_pt ? "ок" : "МИМО");
 		if (!ok_pt)
@@ -236,10 +278,12 @@ int main(int argc, char **argv)
 	double dt = now_sec() - t0;
 
 	double mpix = (double)W * H * frames / 1e6;
+	double gbs = (double)W * H * (fmt565 ? 2 : 4) * frames / 1073741824.0 / dt;
 	printf("\n%d кадров %dx%d, %d итераций в пикселе\n", frames, W, H, iters);
 	printf("время      : %.3f с\n", dt);
 	printf("кадров/с   : %.1f\n", frames / dt);
 	printf("Мпикс/с    : %.1f\n", mpix / dt);
+	printf("ГБ/с записи: %.2f\n", gbs);
 
 	/*
 	 * Отдельно меряем ЧТЕНИЕ кадра обратно в память процессора.
