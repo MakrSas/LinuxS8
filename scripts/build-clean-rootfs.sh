@@ -17,6 +17,7 @@ SCALE="3"
 OUT=""
 KERNEL_TREE=""
 PASSWORD_FILE=""
+CLEAN_OUTPUT=0
 
 usage() {
 	cat <<'EOF'
@@ -34,6 +35,7 @@ usage() {
   --output DIR           каталог временного rootfs
   --kernel-tree DIR      установить модули из дерева собранного ядра
   --password-file FILE   временный файл с паролем пользователя
+  --clean-output         удалить незавершённый rootfs этого установщика
   --help
 
 Пароль пользователя запрашивается без отображения символов после сборки.
@@ -53,6 +55,7 @@ while [ "$#" -gt 0 ]; do
 	--output)      OUT="${2:?--output требует значения}"; shift 2 ;;
 	--kernel-tree) KERNEL_TREE="${2:?--kernel-tree требует значения}"; shift 2 ;;
 	--password-file) PASSWORD_FILE="${2:?--password-file требует значения}"; shift 2 ;;
+	--clean-output) CLEAN_OUTPUT=1; shift ;;
 	--help|-h)     usage; exit 0 ;;
 	*)             echo "неизвестный параметр: $1" >&2; usage >&2; exit 2 ;;
 	esac
@@ -105,8 +108,25 @@ case "$OUT" in
 esac
 if [ -e "$OUT" ]; then
 	[ -d "$OUT" ] || { echo "output существует и не является каталогом: $OUT" >&2; exit 1; }
-	[ -z "$(find "$OUT" -mindepth 1 -maxdepth 1 -print -quit)" ] || {
-		echo "output должен быть новым или пустым: $OUT" >&2; exit 1; }
+	if [ -n "$(find "$OUT" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+		if [ "$CLEAN_OUTPUT" -ne 1 ]; then
+			echo "output должен быть новым или пустым: $OUT" >&2
+			echo "Для очистки незавершённой сборки добавьте --clean-output." >&2
+			exit 1
+		fi
+		case "$OUT" in
+			"$ROOT/build/installer"/rootfs-*) ;;
+			*) echo "отказ: --clean-output разрешён только для build/installer/rootfs-*" >&2; exit 2 ;;
+		esac
+		for mount_dir in "$OUT/dev" "$OUT/sys" "$OUT/proc"; do
+			if mountpoint -q "$mount_dir" 2>/dev/null; then
+				umount -R "$mount_dir" 2>/dev/null || true
+			fi
+		done
+		rm -rf -- "$OUT"
+		rm -f -- "$ARCHIVE"
+		mkdir -p "$OUT"
+	fi
 else
 	mkdir -p "$OUT"
 fi

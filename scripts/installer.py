@@ -254,10 +254,16 @@ def build_rootfs(root: Path, suite: str, desktop: str, user: str,
                  hostname: str, label: str, scale: str, password: str) -> Path:
     output = root / "build" / "installer" / f"rootfs-{suite}-{desktop}-scale{scale}"
     archive = Path(str(output) + ".tar.gz")
+    clean_output = False
     if archive.is_file():
         if yes_no(f"Найден готовый локальный rootfs {archive}. Использовать его", True):
             return archive
-        raise UserAbort("Сборка отменена: выберите повторное использование или удалите артефакт вручную.")
+        clean_output = True
+    elif output.is_dir() and any(output.iterdir()):
+        say(f"Найден незавершённый rootfs: {output}")
+        clean_output = yes_no("Очистить его и начать сборку заново", True)
+        if not clean_output:
+            raise UserAbort("Старая сборка сохранена; новая сборка отменена.")
 
     builder = root / "scripts" / "build-clean-rootfs.sh"
     if not builder.is_file():
@@ -279,6 +285,8 @@ def build_rootfs(root: Path, suite: str, desktop: str, user: str,
         "--output", str(output), "--password-file",
         str(secret_path),
     ]
+    if clean_output:
+        args.append("--clean-output")
     kernel_tree = root / "build" / "src" / "linux"
     if kernel_tree.is_dir():
         args.extend(["--kernel-tree", str(kernel_tree)])
