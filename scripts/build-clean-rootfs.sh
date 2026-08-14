@@ -85,7 +85,8 @@ fi
 [ "$(id -u)" -eq 0 ] || {
 	echo "сборщик должен запускаться от root; Linux: sudo $0 ..." >&2; exit 1; }
 command -v debootstrap >/dev/null 2>&1 || {
-	echo "не найден debootstrap. Установите пакет debootstrap и повторите." >&2; exit 1; }
+	echo "не найден debootstrap. Установите: sudo apt-get update && sudo apt-get install -y debootstrap" >&2
+	exit 1; }
 command -v chroot >/dev/null 2>&1 || {
 	echo "не найден chroot." >&2; exit 1; }
 command -v mount >/dev/null 2>&1 || {

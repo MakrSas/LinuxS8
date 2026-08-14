@@ -157,6 +157,76 @@ def ask_password() -> str:
     return password
 
 
+def linux_build_dependencies_missing() -> list[str]:
+    missing: list[str] = []
+    if not shutil.which("debootstrap"):
+        missing.append("debootstrap")
+    host_arch = platform.machine().lower()
+    if host_arch not in {"aarch64", "arm64"}:
+        qemu_ready = shutil.which("qemu-debootstrap") or (
+            Path("/usr/bin/qemu-aarch64-static").is_file()
+            and Path("/proc/sys/fs/binfmt_misc/qemu-aarch64").exists()
+        )
+        if not qemu_ready:
+            missing.extend(["qemu-user-static", "binfmt-support"])
+    return missing
+
+
+def ensure_build_dependencies(root: Path) -> None:
+    """Install host-side debootstrap requirements and continue in this run."""
+    packages = ["debootstrap"]
+    if platform.system() == "Windows":
+        wsl = shutil.which("wsl.exe")
+        if not wsl:
+            raise UserAbort(
+                "На Windows не найден WSL2. Установите WSL2, затем запустите installer.ps1 снова."
+            )
+        linux_root = wsl_path(root)
+        probe = run(
+            [wsl, "--cd", linux_root, "--", "bash", "-lc",
+             "command -v debootstrap >/dev/null && "
+             "(command -v qemu-debootstrap >/dev/null || "
+             "(test -x /usr/bin/qemu-aarch64-static && "
+             "test -e /proc/sys/fs/binfmt_misc/qemu-aarch64))"],
+            check=False, capture=True,
+        )
+        if probe.returncode == 0:
+            return
+        packages.extend(["qemu-user-static", "binfmt-support"])
+        install_prefix = [wsl, "--cd", linux_root, "--", "sudo", "apt-get"]
+        description = "WSL2: " + " ".join(packages)
+    else:
+        missing = linux_build_dependencies_missing()
+        if not missing:
+            return
+        packages = missing
+        if not shutil.which("apt-get"):
+            raise UserAbort(
+                "Не найдены зависимости сборки (" + ", ".join(packages) + ").\n"
+                "Установите их вручную: sudo apt-get update && sudo apt-get install -y "
+                + " ".join(packages)
+            )
+        install_prefix = ["apt-get"]
+        if os.geteuid() != 0:
+            if not shutil.which("sudo"):
+                raise UserAbort(
+                    "Нужны зависимости (" + ", ".join(packages) + "), но sudo не найден.\n"
+                    "Установите вручную: apt-get update && apt-get install -y "
+                    + " ".join(packages)
+                )
+            install_prefix = ["sudo", "apt-get"]
+        description = ", ".join(packages)
+
+    say(f"Не хватает пакетов для сборки: {description}")
+    if not yes_no("Установить их автоматически и продолжить", True):
+        raise UserAbort(
+            "Установите зависимости вручную: apt-get update && apt-get install -y "
+            + " ".join(packages)
+        )
+    run([*install_prefix, "update"])
+    run([*install_prefix, "install", "-y", *packages])
+
+
 def build_rootfs(root: Path, suite: str, desktop: str, user: str,
                  hostname: str, label: str, scale: str, password: str) -> Path:
     output = root / "build" / "installer" / f"rootfs-{suite}-{desktop}-scale{scale}"
@@ -427,10 +497,12 @@ def main() -> int:
         user = normalized_user
     hostname = args.hostname or ask("Имя телефона", "dreamlte")
     label = args.root_label or ask("Метка rootfs", "linuxroot")
-    password = ask_password()
-
-    archive = args.rootfs_archive.expanduser().resolve() if args.rootfs_archive else \
-        build_rootfs(root, suite, desktop, user, hostname, label, scale, password)
+    if args.rootfs_archive:
+        archive = args.rootfs_archive.expanduser().resolve()
+    else:
+        ensure_build_dependencies(root)
+        password = ask_password()
+        archive = build_rootfs(root, suite, desktop, user, hostname, label, scale, password)
     if not archive.is_file():
         raise UserAbort(f"Архив rootfs не найден: {archive}")
     say(f"Rootfs: {archive} ({archive.stat().st_size / (1024 ** 2):.1f} MiB)")
