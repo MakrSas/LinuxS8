@@ -70,6 +70,7 @@ case "$SCALE" in
 	1|2|3|4) ;;
 	*) echo "--scale должен быть целым числом 1..4; 3 = 300%%" >&2; exit 2 ;;
 esac
+LINUX_USER="${LINUX_USER,,}"
 [[ "$LINUX_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || {
 	echo "недопустимое имя пользователя: $LINUX_USER" >&2; exit 2; }
 [[ "$LINUX_HOSTNAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || {

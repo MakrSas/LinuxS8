@@ -39,15 +39,18 @@ def run(command: list[str], *, check: bool = True, capture: bool = False,
         cwd: Path | None = None, env: dict[str, str] | None = None):
     shown = " ".join(str(item) for item in command)
     say(f"$ {shown}")
-    return subprocess.run(
-        [str(item) for item in command],
-        cwd=str(cwd) if cwd else None,
-        env=env,
-        check=check,
-        text=capture,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-    )
+    try:
+        return subprocess.run(
+            [str(item) for item in command],
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            check=check,
+            text=capture,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+        )
+    except subprocess.CalledProcessError as error:
+        raise UserAbort(f"Команда завершилась с кодом {error.returncode}.") from error
 
 
 def ask(prompt: str, default: str = "") -> str:
@@ -418,6 +421,10 @@ def main() -> int:
          ("4", "400%"), ("1", "100%")],
     )
     user = args.user or ask("Имя аккаунта", "phone")
+    normalized_user = user.lower()
+    if normalized_user != user:
+        say(f"Имя Linux-аккаунта приведено к строчным буквам: {user} -> {normalized_user}")
+        user = normalized_user
     hostname = args.hostname or ask("Имя телефона", "dreamlte")
     label = args.root_label or ask("Метка rootfs", "linuxroot")
     password = ask_password()
