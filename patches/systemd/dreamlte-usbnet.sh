@@ -19,6 +19,65 @@ PREFIX=24
 MAC_HOST=02:1d:6b:00:00:01
 MAC_DEV=02:1d:6b:00:00:02
 
+# The connector has two switches before the DWC3 PHY:
+# S2MM005 is the Type-C/CC controller on hsi2c_30 (10950000), while the
+# MAX77865 MUIC exposes its switch as the vendor dummy client at 0x25.
+# Without these steps the gadget can be configured internally while the
+# connector-side D+/D- path remains open.
+find_i2c_bus() {
+	local pattern="$1"
+	local node target
+
+	for node in /sys/class/i2c-dev/i2c-* /sys/class/i2c-adapter/i2c-*; do
+		[ -e "$node" ] || continue
+		target=$(readlink -f "$node/device" 2>/dev/null || true)
+		case "$target" in
+			*$pattern*) echo "${node##*-}"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+route_usb_switches() {
+	local ccic_bus muic_bus muic_id muic_route
+
+	command -v i2ctransfer >/dev/null 2>&1 || {
+		echo "нет i2ctransfer — USB-C route не включён" >&2
+		return 1
+	}
+
+	ccic_bus=$(find_i2c_bus 10950000.i2c || true)
+	muic_bus=$(find_i2c_bus 10970000.i2c || true)
+	if [ -z "$ccic_bus" ] || [ -z "$muic_bus" ]; then
+		echo "не найдены I2C-шины USB-C: ccic=$ccic_bus muic=$muic_bus" >&2
+		return 1
+	fi
+	echo "USB-C I2C: ccic=$ccic_bus muic=$muic_bus"
+
+	# Vendor MAX77865 MUIC: ID 0x65 and COM_USB_AP at CONTROL1=0x89.
+	muic_id=$(i2ctransfer -y "$muic_bus" w1@0x25 0x00 r1 |
+		tr -d '[:space:]\r')
+	[ "$muic_id" = "0x65" ] || {
+		echo "неожиданный MAX77865 MUIC ID: $muic_id" >&2
+		return 1
+	}
+
+	i2ctransfer -y "$muic_bus" w2@0x25 0x19 0x89
+	muic_route=$(i2ctransfer -y "$muic_bus" w1@0x25 0x19 r1 |
+		tr -d '[:space:]\r')
+	[ "$muic_route" = "0x89" ] || {
+		echo "MAX77865 MUIC route readback failed: $muic_route" >&2
+		return 1
+	}
+
+	# Vendor TYPE_C_ATTACH_UFP: detach, then attach as sink/UFP.
+	i2ctransfer -y "$ccic_bus" w4@0x33 0x00 0x10 0x03 0x12
+	sleep 1
+	i2ctransfer -y "$ccic_bus" w4@0x33 0x00 0x10 0x03 0x14
+	sleep 1
+	echo "USB-C route: MAX77865=0x89, S2MM005=UFP"
+}
+
 mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
 
 # Контроллер должен был появиться сам. Если его нет — PHY не поднялся, и
@@ -29,6 +88,10 @@ if [ -z "$UDC" ]; then
 	exit 1
 fi
 echo "контроллер: $UDC"
+
+# Do this before binding ECM: a configured UDC does not prove that the
+# connector-side MUIC/CCIC path is connected to D+/D-.
+route_usb_switches
 
 if [ -d "$GADGET" ]; then
 	# Отвязка: пока гаджет привязан, ядро отвергает любые изменения.
