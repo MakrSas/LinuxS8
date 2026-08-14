@@ -13,7 +13,39 @@
 #     будет взять (только этот файл и расскажет, что пошло не так);
 #   * вход должен быть автоматическим — набрать пароль физически нечем;
 #   * всё, что ждёт сеть, надо выключить, иначе загрузка встанет в таймаут.
-set -x
+set -euo pipefail
+
+LINUX_USER="${LINUX_USER:-phone}"
+LINUX_HOSTNAME="${LINUX_HOSTNAME:-dreamlte}"
+LINUX_DESKTOP="${LINUX_DESKTOP:-phosh}"
+LINUX_ROOT_LABEL="${LINUX_ROOT_LABEL:-linuxroot}"
+LINUX_SCALE="${LINUX_SCALE:-3}"
+LINUX_USER_PASSWORD="${LINUX_USER_PASSWORD:-}"
+
+case "$LINUX_DESKTOP" in
+	phosh|gnome) ;;
+	*) echo 'LINUX_DESKTOP must be phosh or gnome' >&2; exit 1 ;;
+esac
+case "$LINUX_SCALE" in
+	1|2|3|4) ;;
+	*) echo 'LINUX_SCALE must be an integer from 1 to 4' >&2; exit 1 ;;
+esac
+
+if [ -z "$LINUX_USER_PASSWORD" ]; then
+	if [ -t 0 ]; then
+		printf 'Password for %s: ' "$LINUX_USER" >&2
+		read -r -s LINUX_USER_PASSWORD
+		printf '\n' >&2
+	else
+		echo 'LINUX_USER_PASSWORD is required in a non-interactive chroot' >&2
+		exit 1
+	fi
+fi
+
+if [ -z "$LINUX_USER_PASSWORD" ]; then
+	echo 'the Linux user password must not be empty' >&2
+	exit 1
+fi
 
 # --- 1. Журнал на диск -------------------------------------------------
 # Storage=auto пишет на диск только если каталог уже существует, поэтому
@@ -35,17 +67,19 @@ fi
 # системе просто нет — с passno=1 systemd-fsck-root уйдёт в ошибку на каждой
 # загрузке. Проверять карту всё равно есть чем из TWRP.
 cat > /etc/fstab <<'EOF'
-LABEL=userdata  /      ext4  defaults,noatime  0  0
+LABEL=__LINUX_ROOT_LABEL__  /      ext4  defaults,noatime  0  0
 tmpfs           /tmp   tmpfs mode=1777,nosuid,nodev  0  0
 EOF
+sed -i "s/__LINUX_ROOT_LABEL__/$LINUX_ROOT_LABEL/" /etc/fstab
 
 # --- 3. Имя машины -----------------------------------------------------
-echo dreamlte > /etc/hostname
+echo "$LINUX_HOSTNAME" > /etc/hostname
 cat > /etc/hosts <<'EOF'
 127.0.0.1	localhost
-127.0.1.1	dreamlte
+127.0.1.1	__LINUX_HOSTNAME__
 ::1		localhost ip6-localhost ip6-loopback
 EOF
+sed -i "s/__LINUX_HOSTNAME__/$LINUX_HOSTNAME/" /etc/hosts
 
 # --- 4. Обычный пользователь -------------------------------------------
 # GDM не пускает root в графический сеанс, так что нужен обычный аккаунт.
@@ -58,17 +92,27 @@ for g in $GROUPS_WANTED; do
 		GROUPS_OK="${GROUPS_OK:+$GROUPS_OK,}$g"
 	fi
 done
-if ! id phone >/dev/null 2>&1; then
-	useradd -m -s /bin/bash -G "$GROUPS_OK" phone
+if ! id "$LINUX_USER" >/dev/null 2>&1; then
+	if [ -n "$GROUPS_OK" ]; then
+		useradd -m -s /bin/bash -G "$GROUPS_OK" "$LINUX_USER"
+	else
+		useradd -m -s /bin/bash "$LINUX_USER"
+	fi
 fi
-echo 'phone:phone' | chpasswd
-echo 'root:root' | chpasswd
+printf '%s:%s\n' "$LINUX_USER" "$LINUX_USER_PASSWORD" | chpasswd
+passwd -l root >/dev/null 2>&1 || true
 
-# --- 5. Автовход в GNOME -----------------------------------------------
+# Host keys must be unique per installation.  Never copy the keys from the
+# build host or from another phone into a public/rootfs template.
+rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub
+ssh-keygen -A >/dev/null 2>&1 || true
+
+# --- 5. Автовход / оболочка ---------------------------------------------
 # Файл переписывается целиком, а не патчится: в стоковом daemon.conf те же
 # строки уже присутствуют закомментированными, поэтому любая проверка вида
 # "есть ли там AutomaticLoginEnable" срабатывает на комментарий и тихо
 # ничего не делает (наступили на это с первого раза).
+if [ "$LINUX_DESKTOP" = gnome ] && [ -d /etc/gdm3 ]; then
 cat > /etc/gdm3/daemon.conf <<'EOF'
 # GDM configuration storage
 #
@@ -78,7 +122,7 @@ cat > /etc/gdm3/daemon.conf <<'EOF'
 # Пароль набрать физически нечем — клавиатуры у этого устройства нет,
 # а экранная появляется только внутри уже запущенного сеанса GNOME.
 AutomaticLoginEnable = true
-AutomaticLogin = phone
+AutomaticLogin = __LINUX_USER__
 
 # Xorg не установлен (ставили с --no-install-recommends), в
 # /usr/share/wayland-sessions лежит только gnome — то есть сеанс в любом
@@ -96,9 +140,47 @@ WaylandEnable = true
 # по журналу на карте — другого канала диагностики у нас нет.
 Enable = true
 EOF
+sed -i "s/__LINUX_USER__/$LINUX_USER/" /etc/gdm3/daemon.conf
+fi
+
+# --- 5a. Масштаб интерфейса --------------------------------------------
+# У simpledrm нет EDID, поэтому GNOME/phoc не могут надёжно сохранить
+# настройку из графического диалога. Записываем целое значение в чистый
+# образ заранее. Значение 3 соответствует 300%% и оставляет на экране
+# 480 логических пикселей по ширине — это минимально удобный режим для
+# текущего 1440x2960 дисплея.
+if [ "$LINUX_DESKTOP" = phosh ]; then
+	mkdir -p /etc/phosh
+	PHOC_MARK='# --- dreamlte-installer-scale ---'
+	if [ -f /etc/phosh/phoc.ini ]; then
+		sed -i "/^$PHOC_MARK/,\$d" /etc/phosh/phoc.ini
+	fi
+	cat >> /etc/phosh/phoc.ini <<EOF
+$PHOC_MARK
+[output:Unknown-1]
+scale = $LINUX_SCALE
+EOF
+else
+	mkdir -p /etc/dconf/db/local.d
+	cat > /etc/dconf/db/local.d/01-dreamlte-scale <<EOF
+[org/gnome/desktop/interface]
+scaling-factor=uint32 $LINUX_SCALE
+EOF
+	if command -v dconf >/dev/null 2>&1; then
+		dconf update || true
+	fi
+fi
 
 # --- 6. Цель по умолчанию ----------------------------------------------
 systemctl set-default graphical.target
+mkdir -p /etc/systemd/system/graphical.target.wants
+if [ "$LINUX_DESKTOP" = phosh ]; then
+	rm -f /etc/systemd/system/graphical.target.wants/gdm3.service
+	ln -sf /usr/lib/systemd/system/phosh.service \
+		/etc/systemd/system/graphical.target.wants/phosh.service
+else
+	rm -f /etc/systemd/system/graphical.target.wants/phosh.service
+fi
 
 # --- 7. Выключить всё, что ждёт сеть или диск --------------------------
 # Без этого загрузка упирается в таймауты по 90-120 секунд на каждом.

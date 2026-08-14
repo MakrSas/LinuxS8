@@ -1,5 +1,5 @@
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
-index 305dc72f9..6c84a831e 100644
+index 305dc72f9..dacd2e542 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
 +++ b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
 @@ -26,6 +26,34 @@ chosen {
@@ -60,7 +60,7 @@ index 305dc72f9..6c84a831e 100644
  		};
  
  		cont_splash_mem: framebuffer@cc000000 {
-@@ -100,6 +137,99 @@ reg_placeholder: regulator-0 {
+@@ -100,6 +137,126 @@ reg_placeholder: regulator-0 {
  		compatible = "regulator-fixed";
  		regulator-name = "reg-placeholder";
  	};
@@ -157,10 +157,37 @@ index 305dc72f9..6c84a831e 100644
 + */
 +&gpu {
 +	status = "okay";
++};
++
++/* Native command-mode KMS is kept staged; simpledrm remains the active output. */
++&dsim {
++	#address-cells = <1>;
++	#size-cells = <0>;
++	vddcore-supply = <&reg_placeholder>;
++	vddio-supply = <&reg_placeholder>;
++	status = "okay";
++
++	panel@0 {
++		compatible = "samsung,s6e3ha6";
++		reg = <0>;
++		reset-gpios = <&gpa0 5 GPIO_ACTIVE_LOW>;
++		te-gpios = <&gpb0 1 GPIO_ACTIVE_HIGH>;
++		/* Keep native panel disabled until DECON/DSIM has a runtime checkpoint. */
++		status = "disabled";
++	};
++};
++
++&decon {
++	/*
++	 * Native command-mode scanout.  The separately archived
++	 * boot_kms-native-safe.img keeps this node enabled but leaves the panel
++	 * disabled, providing the USB-reachable rollback/test stage.
++	 */
++	status = "okay";
  };
  
  &hsi2c_23 {
-@@ -109,6 +239,42 @@ touchscreen@48 {
+@@ -109,6 +266,42 @@ touchscreen@48 {
  		compatible = "samsung,s6sy761";
  		reg = <0x48>;
  
@@ -203,7 +230,94 @@ index 305dc72f9..6c84a831e 100644
  		/* TODO: Update once PMIC is implemented */
  		avdd-supply = <&reg_placeholder>;
  		vdd-supply = <&reg_placeholder>;
-@@ -129,19 +295,56 @@ &mmc {
+@@ -121,6 +314,86 @@ touchscreen@48 {
+ 	};
+ };
+ 
++/*
++ * USB-C CC/MUIC (S2MM005) is on the second I2C controller of USI12,
++ * hsi2c_30, at 0x33.  Bring up the bus by itself first: the first test
++ * must be a read/scan from userspace, not a guessed switch write.
++ */
++&usi12 {
++	samsung,mode = <USI_MODE_I2C1>;
++	status = "okay";
++};
++
++&hsi2c_30 {
++	status = "okay";
++
++	/*
++	 * The vendor board file configures all three CCIC-related pins before
++	 * binding s2mm005: OM=1 (normal firmware mode), the CCIC interrupt as
++	 * an external falling-edge input, and USB3.1_CON_SEL with a pull-up.
++	 * Keep that electrical setup in DT; the first mainline driver below is
++	 * deliberately diagnostic and does not guess at the switch state.
++	 */
++	s2mm005: usbpd-s2mm005@33 {
++		compatible = "samsung,s2mm005";
++		reg = <0x33>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&s2mm005_om &s2mm005_irq &s2mm005_con_sel>;
++
++		interrupt-parent = <&gpa1>;
++		interrupts = <7 IRQ_TYPE_LEVEL_LOW>;
++	};
++};
++
++/* Vendor MUIC (max77854/max77865) is hsi2c_32 at 0x66 inside USI13. */
++&usi13 {
++	samsung,mode = <USI_MODE_I2C1>;
++	status = "okay";
++};
++
++&hsi2c_32 {
++	status = "okay";
++
++	/* MAX77865-compatible PMIC; ID 0x65 was read from the live phone. */
++	max77865: pmic@66 {
++		compatible = "maxim,max77865", "maxim,max77854";
++		reg = <0x66>;
++		status = "okay";
++	};
++};
++
++&pinctrl_alive {
++	/* Vendor: usbpd_irq, gpa1-7, function 0xf, pull-up. */
++	s2mm005_irq: s2mm005-irq-pins {
++		samsung,pins = "gpa1-7";
++		samsung,pin-function = <0xf>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
++	};
++};
++
++&pinctrl_fsys0 {
++	/* Vendor initial-state: S2MM005 OM is held high. */
++	s2mm005_om: s2mm005-om-pins {
++		samsung,pins = "gpi1-6";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++		samsung,pin-val = <1>;
++		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
++		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_PREV>;
++	};
++
++	/* Vendor initial-state: USB3.1_COM_SEL is an input with pull-up. */
++	s2mm005_con_sel: s2mm005-con-sel-pins {
++		samsung,pins = "gpi1-7";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
++		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_PREV>;
++	};
++};
++
+ &oscclk {
+ 	clock-frequency = <26000000>;
+ };
+@@ -129,19 +402,56 @@ &mmc {
  	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd2_cd>;
  	pinctrl-names = "default";
  
@@ -265,7 +379,7 @@ index 305dc72f9..6c84a831e 100644
  
  	status = "okay";
  };
-@@ -194,3 +397,24 @@ &usi9 {
+@@ -194,3 +504,24 @@ &usi9 {
  	samsung,mode = <USI_MODE_I2C0_1>;
  	status = "okay";
  };
@@ -291,13 +405,105 @@ index 305dc72f9..6c84a831e 100644
 +	samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
 +};
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
-index ff114cd6c..11d12f86b 100644
+index ff114cd6c..8462c3dd2 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 +++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
-@@ -1374,6 +1374,69 @@ spi_1: spi@109e0000 {
+@@ -1374,6 +1374,161 @@ spi_1: spi@109e0000 {
  			status = "disabled";
  		};
  
++		/*
++		 * DPU0 contains the DECON0/DSIM0 register clocks.  Keeping this
++		 * controller separate from the display driver is important: it lets
++		 * the DRM bring-up use normal clock references instead of touching
++		 * power-gated registers directly.
++		 */
++		cmu_dpu0: clock-controller@12800000 {
++			compatible = "samsung,exynos8895-cmu-dpu0";
++			reg = <0x12800000 0x8000>;
++			#clock-cells = <1>;
++			clocks = <&oscclk>, <&cmu_top CLK_DOUT_CMU_DPU_BUS>;
++			clock-names = "oscclk", "bus";
++			power-domains = <&pd_dpu0>;
++		};
++
++		dpu0_sysreg: syscon@12821000 {
++			compatible = "samsung,exynos8895-dpu0-sysreg", "syscon";
++			reg = <0x12821000 0x10>;
++			clocks = <&cmu_dpu0 CLK_GOUT_DPU0_BUSP>;
++		};
++
++		/*
++		 * The high-speed and escape clocks are generated by DSIM's own PLL;
++		 * the four driver clock inputs intentionally share its APB gate.
++		 */
++		dsim: dsi@12870000 {
++			compatible = "samsung,exynos8895-mipi-dsi";
++			reg = <0x12870000 0x100>;
++			interrupts = <GIC_SPI 150 IRQ_TYPE_LEVEL_HIGH>;
++
++			clocks = <&cmu_dpu0 CLK_GOUT_DPU0_DSIM0_PCLK>,
++				 <&cmu_dpu0 CLK_GOUT_DPU0_DSIM0_PCLK>,
++				 <&cmu_dpu0 CLK_GOUT_DPU0_DSIM0_PCLK>,
++				 <&cmu_dpu0 CLK_GOUT_DPU0_DSIM0_PCLK>;
++			clock-names = "bus", "pll", "byte", "esc";
++			samsung,pll-clock-frequency = <26000000>;
++			samsung,burst-clock-frequency = <898000000>;
++			samsung,esc-clock-frequency = <20000000>;
++			samsung,sysreg = <&dpu0_sysreg>;
++
++			phys = <&mipi_phy 1>;
++			phy-names = "dsim";
++			power-domains = <&pd_dpu0>;
++			status = "disabled";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++
++					dsim_to_decon: endpoint {
++						remote-endpoint = <&decon_to_dsim>;
++					};
++				};
++			};
++		};
++
++		/*
++		 * DECON0 feeds DSIM0 through the DPU0 display sysreg.  IDMA_G1 is
++		 * the fixed first scanout channel used by Samsung's fbdev driver.
++		 * Keep the component disabled until the native DRM KMS driver is
++		 * enabled in the board DTS.
++		 */
++		decon: display-controller@12860000 {
++			compatible = "samsung,exynos8895-decon";
++			reg = <0x12860000 0x10000>, <0x12852000 0x1000>,
++			      <0x128b2000 0x1000>, <0x128b0000 0x100>;
++			reg-names = "decon", "dpp", "idma", "dma-common";
++			interrupts = <GIC_SPI 144 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "frame-done";
++
++			clocks = <&cmu_dpu0 CLK_GOUT_DPU0_DECON0_ACLK>,
++				 <&cmu_dpu0 CLK_GOUT_DPU0_DECON0_PCLKM>,
++				 <&cmu_dpu0 CLK_GOUT_DPU0_DECON0_PCLKS>,
++				 <&cmu_dpu0 CLK_GOUT_DPU0_DPP_G1_ACLK>,
++				 <&cmu_dpu0 CLK_GOUT_DPU0_DPP_PCLKM>,
++				 <&cmu_dpu0 CLK_GOUT_DPU0_DPP_PCLKS>;
++			clock-names = "decon-aclk", "decon-pclkm", "decon-pclks",
++				      "dpp-aclk", "dpp-pclkm", "dpp-pclks";
++			power-domains = <&pd_dpu0>;
++			samsung,sysreg = <&dpu0_sysreg>;
++			status = "disabled";
++
++			port {
++				decon_to_dsim: endpoint {
++					remote-endpoint = <&dsim_to_decon>;
++				};
++			};
++		};
++
 +		cmu_g3d: clock-controller@13800000 {
 +			compatible = "samsung,exynos8895-cmu-g3d";
 +			reg = <0x13800000 0x8000>;
@@ -364,7 +570,7 @@ index ff114cd6c..11d12f86b 100644
  		cmu_fsys0: clock-controller@11000000 {
  			compatible = "samsung,exynos8895-cmu-fsys0";
  			reg = <0x11000000 0x8000>;
-@@ -1433,6 +1496,18 @@ mmc: mmc@11500000 {
+@@ -1433,6 +1588,18 @@ mmc: mmc@11500000 {
  			clocks = <&cmu_fsys1 CLK_GOUT_FSYS1_MMC_CARD_I_ACLK>,
  				 <&cmu_fsys1 CLK_GOUT_FSYS1_MMC_CARD_SDCLKIN>;
  			clock-names = "biu", "ciu";
@@ -383,7 +589,7 @@ index ff114cd6c..11d12f86b 100644
  			fifo-depth = <64>;
  			interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH>;
  			#address-cells = <1>;
-@@ -1440,6 +1515,160 @@ mmc: mmc@11500000 {
+@@ -1440,6 +1607,160 @@ mmc: mmc@11500000 {
  			status = "disabled";
  		};
  
@@ -544,10 +750,18 @@ index ff114cd6c..11d12f86b 100644
  		pinctrl_abox: pinctrl@13e60000 {
  			compatible = "samsung,exynos8895-pinctrl";
  			reg = <0x13e60000 0x1000>;
-@@ -1470,6 +1699,24 @@ pmu_system_controller: system-controller@16480000 {
+@@ -1468,6 +1789,45 @@ pmu_system_controller: system-controller@16480000 {
+ 			compatible = "samsung,exynos8895-pmu",
+ 				     "samsung,exynos7-pmu", "syscon";
  			reg = <0x16480000 0x10000>;
- 		};
- 
++
++			/* The DSI D-PHY reset sequence is issued by DSIM itself. */
++			mipi_phy: mipi-phy {
++				compatible = "samsung,exynos8895-mipi-video-phy";
++				#phy-cells = <1>;
++			};
++		};
++
 +		/*
 +		 * Домен питания GPU. В даунстриме он называется
 +		 * EMBEDDED_G3D и включается последовательностью pmucal:
@@ -566,25 +780,136 @@ index ff114cd6c..11d12f86b 100644
 +			label = "G3D";
 +		};
 +
++		/* DPU0/1 follow the same CONFIGURATION/STATUS layout as G3D. */
++		pd_dpu0: power-domain@16484060 {
++			compatible = "samsung,exynos5433-pd";
++			reg = <0x16484060 0x20>;
++			#power-domain-cells = <0>;
++			label = "DPU0";
++		};
++
++		pd_dpu1: power-domain@16484080 {
++			compatible = "samsung,exynos5433-pd";
++			reg = <0x16484080 0x20>;
++			#power-domain-cells = <0>;
++			label = "DPU1";
+ 		};
+ 
  		pinctrl_alive: pinctrl@164b0000 {
- 			compatible = "samsung,exynos8895-pinctrl";
- 			reg = <0x164b0000 0x1000>;
 diff --git a/drivers/clk/samsung/clk-exynos8895.c b/drivers/clk/samsung/clk-exynos8895.c
-index 259481c42..7c39a5e3d 100644
+index 259481c42..ae2ee9596 100644
 --- a/drivers/clk/samsung/clk-exynos8895.c
 +++ b/drivers/clk/samsung/clk-exynos8895.c
-@@ -22,6 +22,7 @@
+@@ -22,6 +22,8 @@
  #define CLKS_NR_PERIC0	(CLK_GOUT_PERIC0_USI03_I_SCLK_USI + 1)
  #define CLKS_NR_PERIC1	(CLK_GOUT_PERIC1_XIU_P_PERIC1_ACLK + 1)
  #define CLKS_NR_PERIS	(CLK_GOUT_PERIS_XIU_P_PERIS_ACLK + 1)
++#define CLKS_NR_DPU0	(CLK_GOUT_DPU0_DPP_G1_ACLK + 1)
 +#define CLKS_NR_G3D	(CLK_GOUT_G3D_XIU_P_G3D_ACLK + 1)
  
  /* ---- CMU_TOP ------------------------------------------------------------- */
  
-@@ -2758,6 +2759,162 @@ static const struct samsung_cmu_info peric1_cmu_info __initconst = {
+@@ -2758,6 +2760,259 @@ static const struct samsung_cmu_info peric1_cmu_info __initconst = {
  	.clk_name		= "bus",
  };
  
++/* ---- CMU_DPU0 ------------------------------------------------------------ */
++
++/* Register offsets for the always-on portion of the DPU0 clock tree. */
++#define PLL_CON0_MUX_CLKCMU_DPU_BUS_USER				0x0100
++#define PLL_CON2_MUX_CLKCMU_DPU_BUS_USER				0x0108
++#define CLK_CON_DIV_DIV_CLK_DPU0_BUSP					0x1808
++#define CLK_CON_GAT_CLKCMU_DPU0_BUSD					0x2000
++#define CLK_CON_GAT_CLKCMU_DPU0_BUSP					0x2004
++#define CLK_CON_GAT_CLK_BLK_DPU0_UID_DPU0_CMU_DPU0_IPCLKPORT_PCLK	0x2008
++#define CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DECON0_IPCLKPORT_PCLKM	0x2014
++#define CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DECON0_IPCLKPORT_PCLKS	0x2018
++#define CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DPP_IPCLKPORT_PCLKM	0x2024
++#define CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DPP_IPCLKPORT_PCLKS	0x2028
++#define CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_MIPI_DSIM0_IPCLKPORT_PCLKS	0x204c
++#define CLK_CON_GAT_GOUT_BLK_DPU0_UID_DECON0_IPCLKPORT_ACLK		0x207c
++#define CLK_CON_GAT_GOUT_BLK_DPU0_UID_DPP_IPCLKPORT_DPP_G1_ACLK	0x2084
++
++static const unsigned long dpu0_clk_regs[] __initconst = {
++	PLL_CON0_MUX_CLKCMU_DPU_BUS_USER,
++	PLL_CON2_MUX_CLKCMU_DPU_BUS_USER,
++	CLK_CON_DIV_DIV_CLK_DPU0_BUSP,
++	CLK_CON_GAT_CLKCMU_DPU0_BUSD,
++	CLK_CON_GAT_CLKCMU_DPU0_BUSP,
++	CLK_CON_GAT_CLK_BLK_DPU0_UID_DPU0_CMU_DPU0_IPCLKPORT_PCLK,
++	CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DECON0_IPCLKPORT_PCLKM,
++	CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DECON0_IPCLKPORT_PCLKS,
++	CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DPP_IPCLKPORT_PCLKM,
++	CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DPP_IPCLKPORT_PCLKS,
++	CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_MIPI_DSIM0_IPCLKPORT_PCLKS,
++	CLK_CON_GAT_GOUT_BLK_DPU0_UID_DECON0_IPCLKPORT_ACLK,
++	CLK_CON_GAT_GOUT_BLK_DPU0_UID_DPP_IPCLKPORT_DPP_G1_ACLK,
++};
++
++PNAME(mout_dpu0_bus_user_p) = { "oscclk", "dout_cmu_dpu_bus" };
++
++static const struct samsung_mux_clock dpu0_mux_clks[] __initconst = {
++	MUX(CLK_MOUT_DPU0_BUS_USER, "mout_dpu0_bus_user",
++	    mout_dpu0_bus_user_p, PLL_CON0_MUX_CLKCMU_DPU_BUS_USER, 4, 1),
++};
++
++static const struct samsung_div_clock dpu0_div_clks[] __initconst = {
++	DIV(CLK_DOUT_DPU0_BUSP, "dout_dpu0_busp", "gout_dpu0_busd",
++	    CLK_CON_DIV_DIV_CLK_DPU0_BUSP, 0, 3),
++};
++
++static const struct samsung_gate_clock dpu0_gate_clks[] __initconst = {
++	GATE(CLK_GOUT_DPU0_BUSD, "gout_dpu0_busd", "mout_dpu0_bus_user",
++	     CLK_CON_GAT_CLKCMU_DPU0_BUSD, 21, 0, 0),
++	GATE(CLK_GOUT_DPU0_BUSP, "gout_dpu0_busp", "dout_dpu0_busp",
++	     CLK_CON_GAT_CLKCMU_DPU0_BUSP, 21, 0, 0),
++	GATE(CLK_GOUT_DPU0_CMU_DPU0_PCLK, "gout_dpu0_cmu_dpu0_pclk",
++	     "gout_dpu0_busp",
++	     CLK_CON_GAT_CLK_BLK_DPU0_UID_DPU0_CMU_DPU0_IPCLKPORT_PCLK,
++	     21, 0, 0),
++	GATE(CLK_GOUT_DPU0_DECON0_PCLKM, "gout_dpu0_decon0_pclkm",
++	     "gout_dpu0_busp",
++	     CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DECON0_IPCLKPORT_PCLKM,
++	     21, 0, 0),
++	GATE(CLK_GOUT_DPU0_DECON0_PCLKS, "gout_dpu0_decon0_pclks",
++	     "gout_dpu0_busp",
++	     CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DECON0_IPCLKPORT_PCLKS,
++	     21, 0, 0),
++	GATE(CLK_GOUT_DPU0_DPP_PCLKM, "gout_dpu0_dpp_pclkm",
++	     "gout_dpu0_busp",
++	     CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DPP_IPCLKPORT_PCLKM,
++	     21, 0, 0),
++	GATE(CLK_GOUT_DPU0_DPP_PCLKS, "gout_dpu0_dpp_pclks",
++	     "gout_dpu0_busp",
++	     CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_DPP_IPCLKPORT_PCLKS,
++	     21, 0, 0),
++	GATE(CLK_GOUT_DPU0_DSIM0_PCLK, "gout_dpu0_dsim0_pclk",
++	     "gout_dpu0_busp",
++	     CLK_CON_GAT_GOUT_BLK_DPU0_UID_AD_APB_MIPI_DSIM0_IPCLKPORT_PCLKS,
++	     21, 0, 0),
++	GATE(CLK_GOUT_DPU0_DECON0_ACLK, "gout_dpu0_decon0_aclk",
++	     "gout_dpu0_busd",
++	     CLK_CON_GAT_GOUT_BLK_DPU0_UID_DECON0_IPCLKPORT_ACLK,
++	     21, 0, 0),
++	GATE(CLK_GOUT_DPU0_DPP_G1_ACLK, "gout_dpu0_dpp_g1_aclk",
++	     "gout_dpu0_busd",
++	     CLK_CON_GAT_GOUT_BLK_DPU0_UID_DPP_IPCLKPORT_DPP_G1_ACLK,
++	     21, 0, 0),
++};
++
++static const struct samsung_cmu_info dpu0_cmu_info __initconst = {
++	.mux_clks		= dpu0_mux_clks,
++	.nr_mux_clks		= ARRAY_SIZE(dpu0_mux_clks),
++	.div_clks		= dpu0_div_clks,
++	.nr_div_clks		= ARRAY_SIZE(dpu0_div_clks),
++	.gate_clks		= dpu0_gate_clks,
++	.nr_gate_clks		= ARRAY_SIZE(dpu0_gate_clks),
++	.nr_clk_ids		= CLKS_NR_DPU0,
++	.clk_regs		= dpu0_clk_regs,
++	.nr_clk_regs		= ARRAY_SIZE(dpu0_clk_regs),
++	.clk_name		= "bus",
++};
++
 +/* ---- CMU_G3D ------------------------------------------------------------- */
 +
 +/* Register Offset definitions for CMU_G3D (0x13800000) */
@@ -744,8 +1069,13 @@ index 259481c42..7c39a5e3d 100644
  static int __init exynos8895_cmu_probe(struct platform_device *pdev)
  {
  	const struct samsung_cmu_info *info;
-@@ -2773,6 +2930,9 @@ static const struct of_device_id exynos8895_cmu_of_match[] = {
+@@ -2771,8 +3026,14 @@ static int __init exynos8895_cmu_probe(struct platform_device *pdev)
+ 
+ static const struct of_device_id exynos8895_cmu_of_match[] = {
  	{
++		.compatible = "samsung,exynos8895-cmu-dpu0",
++		.data = &dpu0_cmu_info,
++	}, {
  		.compatible = "samsung,exynos8895-cmu-fsys0",
  		.data = &fsys0_cmu_info,
 +	}, {
@@ -754,6 +1084,719 @@ index 259481c42..7c39a5e3d 100644
  	}, {
  		.compatible = "samsung,exynos8895-cmu-fsys1",
  		.data = &fsys1_cmu_info,
+diff --git a/drivers/gpu/drm/bridge/samsung-dsim.c b/drivers/gpu/drm/bridge/samsung-dsim.c
+index 9ee051507..743ba43d0 100644
+--- a/drivers/gpu/drm/bridge/samsung-dsim.c
++++ b/drivers/gpu/drm/bridge/samsung-dsim.c
+@@ -15,11 +15,14 @@
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+ #include <linux/export.h>
++#include <linux/iopoll.h>
+ #include <linux/irq.h>
+ #include <linux/media-bus-format.h>
++#include <linux/mfd/syscon.h>
+ #include <linux/of.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
++#include <linux/regmap.h>
+ #include <linux/units.h>
+ 
+ #include <video/mipi_display.h>
+@@ -219,6 +222,42 @@
+ #define DSI_XFER_TIMEOUT_MS		100
+ #define DSI_RX_FIFO_EMPTY		0x30800002
+ 
++/* Exynos8895 DSIM registers not represented by the shared register index. */
++#define EXYNOS8895_DSIM_LINK_STATUS2	0x0010
++#define EXYNOS8895_DSIM_LINK_STATUS3	0x0014
++#define EXYNOS8895_DSIM_NUM_TRANSFER	0x0030
++#define EXYNOS8895_DSIM_UNDERRUN_CTRL	0x0034
++#define EXYNOS8895_DSIM_THRESHOLD	0x0038
++#define EXYNOS8895_DSIM_CPRS_CTRL	0x0074
++#define EXYNOS8895_DSIM_SLICE01		0x0078
++#define EXYNOS8895_DSIM_SLICE23		0x007c
++#define EXYNOS8895_DSIM_CMD_CONFIG	0x0080
++#define EXYNOS8895_DSIM_CMD_TE_CTRL0	0x0084
++#define EXYNOS8895_DSIM_CMD_TE_CTRL1	0x0088
++#define EXYNOS8895_DSIM_PLL_CTRL1	0x00a4
++#define EXYNOS8895_DSIM_PLL_CTRL2	0x00a8
++#define EXYNOS8895_DSIM_PHYCTRL_B2	0x00b4
++#define EXYNOS8895_DSIM_PHYCTRL_B3	0x00b8
++#define EXYNOS8895_DSIM_PHYCTRL_B4	0x00bc
++#define EXYNOS8895_DSIM_PHYCTRL_M1	0x00c0
++#define EXYNOS8895_DSIM_PHYCTRL_M2	0x00c4
++#define EXYNOS8895_DSIM_PHYCTRL_M3	0x00c8
++#define EXYNOS8895_DSIM_PHYCTRL_M4	0x00cc
++
++#define EXYNOS8895_DSIM_DPHY_RESETN	BIT(16)
++#define EXYNOS8895_DSIM_FUNCRST		BIT(8)
++#define EXYNOS8895_DSIM_PLL_STABLE	BIT(0)
++#define EXYNOS8895_DSIM_CLK_LANE_STATUS	GENMASK(5, 4)
++#define EXYNOS8895_DSIM_PLL_TIMER	0x13880
++#define EXYNOS8895_DSIM_LANES		0x1f
++#define EXYNOS8895_DSIM_LANE_ESC_MASK	GENMASK(12, 8)
++#define EXYNOS8895_DSIM_NONCONT_CLK	BIT(25)
++#define EXYNOS8895_DSIM_HSCLK_REQ	BIT(20)
++#define EXYNOS8895_DSIM_WORDCLK_EN	BIT(17)
++#define EXYNOS8895_DSIM_ESCCLK_EN	BIT(16)
++#define EXYNOS8895_DSIM_CPRS_EN		BIT(19)
++#define EXYNOS8895_DSIM_EOTP_EN		BIT(7)
++
+ #define PS_TO_CYCLE(ps, hz) DIV64_U64_ROUND_CLOSEST(((ps) * (hz)), 1000000000000ULL)
+ 
+ enum samsung_dsim_transfer_type {
+@@ -353,6 +392,32 @@ static const unsigned int exynos7870_reg_ofs[] = {
+ 	[DSIM_PHYTIMING2_REG] = 0xBC,
+ };
+ 
++static const unsigned int exynos8895_reg_ofs[] = {
++	[DSIM_LINK_STATUS_REG] = 0x14,
++	[DSIM_DPHY_STATUS_REG] = 0x1c,
++	[DSIM_SWRST_REG] = 0x04,
++	[DSIM_CLKCTRL_REG] = 0x20,
++	[DSIM_TIMEOUT_REG] = 0x28,
++	[DSIM_ESCMODE_REG] = 0x2c,
++	[DSIM_MDRESOL_REG] = 0x3c,
++	[DSIM_MVPORCH_REG] = 0x40,
++	[DSIM_MHPORCH_REG] = 0x44,
++	[DSIM_MSYNC_REG] = 0x48,
++	[DSIM_CONFIG_REG] = 0x4c,
++	[DSIM_INTSRC_REG] = 0x50,
++	[DSIM_INTMSK_REG] = 0x54,
++	[DSIM_PKTHDR_REG] = 0x58,
++	[DSIM_PAYLOAD_REG] = 0x5c,
++	[DSIM_RXFIFO_REG] = 0x60,
++	[DSIM_SFRCTRL_REG] = 0x64,
++	[DSIM_FIFOCTRL_REG] = 0x68,
++	[DSIM_PLLCTRL_REG] = 0xa0,
++	[DSIM_PHYCTRL_REG] = 0xb0,
++	[DSIM_PHYTIMING_REG] = 0xd0,
++	[DSIM_PHYTIMING1_REG] = 0xd4,
++	[DSIM_PHYTIMING2_REG] = 0xd8,
++};
++
+ enum reg_value_idx {
+ 	RESET_TYPE,
+ 	PLL_TIMER,
+@@ -644,6 +709,35 @@ static const struct samsung_dsim_driver_data exynos7870_dsi_driver_data = {
+ 	.min_freq = 500,
+ };
+ 
++static const struct samsung_dsim_driver_data exynos8895_dsi_driver_data = {
++	.reg_ofs = exynos8895_reg_ofs,
++	.plltmr_reg = 0xac,
++	.has_clklane_stop = 1,
++	.has_sfrctrl = 1,
++	.clk_data = exynos7870_clk_bulk_data,
++	.num_clks = ARRAY_SIZE(exynos7870_clk_bulk_data),
++	.max_freq = 1500,
++	.wait_for_hdr_fifo = 1,
++	.num_bits_resol = 13,
++	.video_mode_bit = 18,
++	.pll_stable_bit = 0,
++	.esc_clken_bit = 16,
++	.byte_clken_bit = 17,
++	.tx_req_hsclk_bit = 20,
++	.lane_esc_clk_bit = 12,
++	.lane_esc_data_offset = 8,
++	.pll_p_offset = 13,
++	.pll_m_offset = 3,
++	.pll_s_offset = 0,
++	.main_vsa_offset = 16,
++	.reg_values = exynos7870_reg_values,
++	.pll_fin_min = 5,
++	.pll_fin_max = 12,
++	.m_min = 41,
++	.m_max = 1023,
++	.min_freq = 500,
++};
++
+ static const struct samsung_dsim_driver_data imx8mm_dsi_driver_data = {
+ 	.reg_ofs = exynos5433_reg_ofs,
+ 	.plltmr_reg = 0xa0,
+@@ -686,6 +780,7 @@ samsung_dsim_types[DSIM_TYPE_COUNT] = {
+ 	[DSIM_TYPE_EXYNOS5422] = &exynos5422_dsi_driver_data,
+ 	[DSIM_TYPE_EXYNOS5433] = &exynos5433_dsi_driver_data,
+ 	[DSIM_TYPE_EXYNOS7870] = &exynos7870_dsi_driver_data,
++	[DSIM_TYPE_EXYNOS8895] = &exynos8895_dsi_driver_data,
+ 	[DSIM_TYPE_IMX8MM] = &imx8mm_dsi_driver_data,
+ 	[DSIM_TYPE_IMX8MP] = &imx8mm_dsi_driver_data,
+ };
+@@ -1019,8 +1114,46 @@ static void samsung_dsim_set_phy_ctrl(struct samsung_dsim *dsi)
+ static void samsung_dsim_disable_clock(struct samsung_dsim *dsi)
+ {
+ 	const struct samsung_dsim_driver_data *driver_data = dsi->driver_data;
++	int ret;
+ 	u32 reg;
+ 
++	if (dsi->plat_data->hw_type == DSIM_TYPE_EXYNOS8895) {
++		reg = samsung_dsim_read(dsi, DSIM_CLKCTRL_REG);
++		reg &= ~EXYNOS8895_DSIM_HSCLK_REQ;
++		samsung_dsim_write(dsi, DSIM_CLKCTRL_REG, reg);
++		ret = readl_poll_timeout(dsi->reg_base +
++					 EXYNOS8895_DSIM_LINK_STATUS2, reg,
++					 !(reg & EXYNOS8895_DSIM_CLK_LANE_STATUS),
++					 10, 10000);
++		if (ret)
++			dev_warn(dsi->dev, "DSI clock lane did not leave HS mode\n");
++
++		reg = samsung_dsim_read(dsi, DSIM_CONFIG_REG);
++		reg &= ~EXYNOS8895_DSIM_LANES;
++		samsung_dsim_write(dsi, DSIM_CONFIG_REG, reg);
++		udelay(400);
++
++		reg = samsung_dsim_read(dsi, DSIM_CLKCTRL_REG);
++		reg &= ~(EXYNOS8895_DSIM_NONCONT_CLK |
++			 EXYNOS8895_DSIM_WORDCLK_EN |
++			 EXYNOS8895_DSIM_ESCCLK_EN |
++			 EXYNOS8895_DSIM_LANE_ESC_MASK |
++			 DSIM_ESC_PRESCALER_MASK);
++		reg |= DSIM_ESC_PRESCALER(0xff);
++		samsung_dsim_write(dsi, DSIM_CLKCTRL_REG, reg);
++		writel(0, dsi->reg_base + EXYNOS8895_DSIM_PLL_CTRL1);
++		writel(0, dsi->reg_base + EXYNOS8895_DSIM_PLL_CTRL2);
++
++		reg = samsung_dsim_read(dsi, DSIM_PLLCTRL_REG);
++		reg &= ~DSIM_PLL_EN;
++		samsung_dsim_write(dsi, DSIM_PLLCTRL_REG, reg);
++
++		reg = samsung_dsim_read(dsi, DSIM_SWRST_REG);
++		reg &= ~EXYNOS8895_DSIM_DPHY_RESETN;
++		samsung_dsim_write(dsi, DSIM_SWRST_REG, reg);
++		return;
++	}
++
+ 	reg = samsung_dsim_read(dsi, DSIM_CLKCTRL_REG);
+ 	reg &= ~(BIT(driver_data->lane_esc_clk_bit)
+ 		| DSIM_LANE_ESC_CLK_EN_DATA_MASK(driver_data->lane_esc_data_offset)
+@@ -1232,6 +1365,15 @@ static int samsung_dsim_wait_for_hdr_fifo(struct samsung_dsim *dsi)
+ 	do {
+ 		u32 reg = samsung_dsim_read(dsi, DSIM_FIFOCTRL_REG);
+ 
++		if (dsi->plat_data->hw_type == DSIM_TYPE_EXYNOS8895) {
++			if (!(reg & BIT(11))) {
++				if (!cond_resched())
++					usleep_range(50, 100);
++				return 0;
++			}
++			goto wait;
++		}
++
+ 		if (!dsi->driver_data->has_broken_fifoctrl_emptyhdr) {
+ 			if (reg & DSIM_SFR_HEADER_EMPTY)
+ 				return 0;
+@@ -1247,6 +1389,7 @@ static int samsung_dsim_wait_for_hdr_fifo(struct samsung_dsim *dsi)
+ 			}
+ 		}
+ 
++	wait:
+ 		if (!cond_resched())
+ 			usleep_range(950, 1050);
+ 	} while (--timeout);
+@@ -1615,12 +1758,137 @@ static void samsung_dsim_disable_irq(struct samsung_dsim *dsi)
+ 	disable_irq(dsi->irq);
+ }
+ 
++static int samsung_dsim_init_exynos8895(struct samsung_dsim *dsi)
++{
++	u32 irq_unmask, pll, reg;
++	int ret;
++
++	if (dsi->state & DSIM_STATE_INITIALIZED)
++		return 0;
++
++	if (dsi->lanes != 4)
++		return dev_err_probe(dsi->dev, -EINVAL,
++				     "Exynos8895 requires four DSI lanes\n");
++
++	/* Linux owns a disabled IRQ at this point; also quiesce S-Boot's mask. */
++	samsung_dsim_write(dsi, DSIM_INTMSK_REG, 0xffffffff);
++	samsung_dsim_write(dsi, DSIM_INTSRC_REG, 0xffffffff);
++
++	/* DSIM0 -> D-PHY0, matching Samsung's DPU LPMUX setup. */
++	ret = regmap_write(dsi->sysreg, 0, 0x1201);
++	if (ret)
++		return ret;
++
++	/* Hold the D-PHY in reset while resetting and programming the link. */
++	reg = samsung_dsim_read(dsi, DSIM_SWRST_REG);
++	reg &= ~EXYNOS8895_DSIM_DPHY_RESETN;
++	samsung_dsim_write(dsi, DSIM_SWRST_REG, reg);
++	samsung_dsim_write(dsi, DSIM_SWRST_REG, reg | DSIM_SWRST);
++	ret = readl_poll_timeout(dsi->reg_base +
++				 dsi->driver_data->reg_ofs[DSIM_SWRST_REG], reg,
++				 !(reg & DSIM_SWRST), 10, 10000);
++	if (ret)
++		return dev_err_probe(dsi->dev, ret, "DSIM reset timed out\n");
++
++	/* 898 MHz Dreamlte PHY characterization from Samsung's 8895 CAL. */
++	samsung_dsim_write(dsi, DSIM_CLKCTRL_REG,
++			   EXYNOS8895_DSIM_ESCCLK_EN | 3);
++	writel(0x00000000, dsi->reg_base + EXYNOS8895_DSIM_PLL_CTRL1);
++	writel(0x03800000, dsi->reg_base + EXYNOS8895_DSIM_PLL_CTRL2);
++	samsung_dsim_write(dsi, DSIM_PHYCTRL_REG, 0x000001c2);
++	writel(0x00000800, dsi->reg_base + EXYNOS8895_DSIM_PHYCTRL_B2);
++	writel(0x10001249, dsi->reg_base + EXYNOS8895_DSIM_PHYCTRL_B3);
++	writel(0x00500000, dsi->reg_base + EXYNOS8895_DSIM_PHYCTRL_B4);
++	writel(0x00001980, dsi->reg_base + EXYNOS8895_DSIM_PHYCTRL_M1);
++	writel(0x00000000, dsi->reg_base + EXYNOS8895_DSIM_PHYCTRL_M2);
++	writel(0x00000000, dsi->reg_base + EXYNOS8895_DSIM_PHYCTRL_M3);
++	writel(0x00000000, dsi->reg_base + EXYNOS8895_DSIM_PHYCTRL_M4);
++	samsung_dsim_write(dsi, DSIM_PHYTIMING_REG, 0x00000605);
++	samsung_dsim_write(dsi, DSIM_PHYTIMING1_REG, 0x080e0706);
++	samsung_dsim_write(dsi, DSIM_PHYTIMING2_REG, 0x0008050a);
++
++	writel(EXYNOS8895_DSIM_PLL_TIMER,
++	       dsi->reg_base + dsi->driver_data->plltmr_reg);
++	pll = DSIM_PLL_EN | (5 << 13) | (691 << 3) | 2;
++	if (dsi->swap_dn_dp_clk)
++		pll |= DSIM_PLL_DPDNSWAP_CLK;
++	if (dsi->swap_dn_dp_data)
++		pll |= DSIM_PLL_DPDNSWAP_DAT;
++	samsung_dsim_write(dsi, DSIM_PLLCTRL_REG, pll);
++
++	ret = readl_poll_timeout(dsi->reg_base + EXYNOS8895_DSIM_LINK_STATUS3,
++				 reg, reg & EXYNOS8895_DSIM_PLL_STABLE,
++				 10, 20000);
++	if (ret) {
++		pll &= ~DSIM_PLL_EN;
++		samsung_dsim_write(dsi, DSIM_PLLCTRL_REG, pll);
++		return dev_err_probe(dsi->dev, ret,
++				     "Exynos8895 DSI PLL did not lock\n");
++	}
++	dsi->hs_clock = 898000000;
++
++	/* Enable all four data lanes plus the clock lane, then release D-PHY. */
++	samsung_dsim_write(dsi, DSIM_CONFIG_REG,
++			   (3 << 5) | EXYNOS8895_DSIM_LANES);
++	udelay(400);
++	reg = samsung_dsim_read(dsi, DSIM_CLKCTRL_REG);
++	reg |= EXYNOS8895_DSIM_LANE_ESC_MASK |
++	       EXYNOS8895_DSIM_WORDCLK_EN |
++	       EXYNOS8895_DSIM_NONCONT_CLK;
++	samsung_dsim_write(dsi, DSIM_CLKCTRL_REG, reg);
++	reg = samsung_dsim_read(dsi, DSIM_SWRST_REG);
++	reg |= EXYNOS8895_DSIM_DPHY_RESETN;
++	samsung_dsim_write(dsi, DSIM_SWRST_REG, reg);
++
++	/* 1440x2960 command mode, 3:1 DSC, two 720-pixel slices. */
++	samsung_dsim_write(dsi, DSIM_TIMEOUT_REG, 0x00ffffff);
++	samsung_dsim_write(dsi, DSIM_ESCMODE_REG, 0x01400000);
++	writel(2960, dsi->reg_base + EXYNOS8895_DSIM_NUM_TRANSFER);
++	writel(3022, dsi->reg_base + EXYNOS8895_DSIM_UNDERRUN_CTRL);
++	writel(480, dsi->reg_base + EXYNOS8895_DSIM_THRESHOLD);
++	samsung_dsim_write(dsi, DSIM_MDRESOL_REG, (2960 << 16) | 480);
++	samsung_dsim_write(dsi, DSIM_CONFIG_REG,
++			   EXYNOS8895_DSIM_CPRS_EN |
++			   EXYNOS8895_DSIM_EOTP_EN |
++			   (3 << 5) | EXYNOS8895_DSIM_LANES);
++	writel(BIT(3) | 2, dsi->reg_base + EXYNOS8895_DSIM_CPRS_CTRL);
++	writel((720 << 16) | 720, dsi->reg_base + EXYNOS8895_DSIM_SLICE01);
++	writel((720 << 16) | 720, dsi->reg_base + EXYNOS8895_DSIM_SLICE23);
++	writel(86, dsi->reg_base + EXYNOS8895_DSIM_CMD_TE_CTRL0);
++	writel((8867 << 16) | 10102,
++	       dsi->reg_base + EXYNOS8895_DSIM_CMD_TE_CTRL1);
++	samsung_dsim_write(dsi, DSIM_SFRCTRL_REG,
++			   DSIM_SFR_CTRL_SHADOW_UPDATE |
++			   DSIM_SFR_CTRL_SHADOW_EN);
++
++	/* Request HS first, as in Samsung's CAL start sequence. */
++	reg = samsung_dsim_read(dsi, DSIM_CLKCTRL_REG);
++	reg |= EXYNOS8895_DSIM_HSCLK_REQ;
++	samsung_dsim_write(dsi, DSIM_CLKCTRL_REG, reg);
++
++	/* Clear stale state and unmask only the interrupts used by this driver. */
++	irq_unmask = DSIM_INT_SW_RST_RELEASE |
++		     DSIM_INT_SFR_FIFO_EMPTY |
++		     DSIM_INT_SFR_HDR_FIFO_EMPTY |
++		     DSIM_INT_FRAME_DONE | BIT(23) | BIT(19) |
++		     DSIM_INT_RX_DONE | DSIM_INT_RX_ECC_ERR | BIT(13);
++	samsung_dsim_write(dsi, DSIM_INTSRC_REG, 0xffffffff);
++	samsung_dsim_enable_irq(dsi);
++	samsung_dsim_write(dsi, DSIM_INTMSK_REG, ~irq_unmask);
++
++	dsi->state |= DSIM_STATE_INITIALIZED;
++	dev_info(dsi->dev, "Exynos8895 DSIM initialized at 898 MHz\n");
++	return 0;
++}
++
+ static int samsung_dsim_init(struct samsung_dsim *dsi)
+ {
+ 	const struct samsung_dsim_driver_data *driver_data = dsi->driver_data;
+ 
+ 	if (dsi->state & DSIM_STATE_INITIALIZED)
+ 		return 0;
++	if (dsi->plat_data->hw_type == DSIM_TYPE_EXYNOS8895)
++		return samsung_dsim_init_exynos8895(dsi);
+ 
+ 	samsung_dsim_reset(dsi);
+ 	samsung_dsim_enable_irq(dsi);
+@@ -1672,8 +1940,10 @@ static void samsung_dsim_atomic_enable(struct drm_bridge *bridge,
+ {
+ 	struct samsung_dsim *dsi = bridge_to_dsi(bridge);
+ 
+-	samsung_dsim_set_display_mode(dsi);
+-	samsung_dsim_set_display_enable(dsi, true);
++	if (dsi->plat_data->hw_type != DSIM_TYPE_EXYNOS8895) {
++		samsung_dsim_set_display_mode(dsi);
++		samsung_dsim_set_display_enable(dsi, true);
++	}
+ 
+ 	dsi->state |= DSIM_STATE_VIDOUT_AVAILABLE;
+ }
+@@ -1686,7 +1956,8 @@ static void samsung_dsim_atomic_disable(struct drm_bridge *bridge,
+ 	if (!(dsi->state & DSIM_STATE_ENABLED))
+ 		return;
+ 
+-	samsung_dsim_set_display_enable(dsi, false);
++	if (dsi->plat_data->hw_type != DSIM_TYPE_EXYNOS8895)
++		samsung_dsim_set_display_enable(dsi, false);
+ 	dsi->state &= ~DSIM_STATE_VIDOUT_AVAILABLE;
+ }
+ 
+@@ -1799,7 +2070,7 @@ static int samsung_dsim_atomic_check(struct drm_bridge *bridge,
+ 	 * and error, it appears that the HBP and HSA do not appearto need the same
+ 	 * correction that HFP does.
+ 	 */
+-	if (dsi->lanes > 1) {
++	if (dsi->plat_data->hw_type != DSIM_TYPE_EXYNOS8895 && dsi->lanes > 1) {
+ 		int hfp = adjusted_mode->hsync_start - adjusted_mode->hdisplay;
+ 		int remainder = hfp % dsi->lanes;
+ 
+@@ -1862,7 +2133,8 @@ static int samsung_dsim_register_te_irq(struct samsung_dsim *dsi, struct device
+ 	int te_gpio_irq;
+ 	int ret;
+ 
+-	dsi->te_gpio = devm_gpiod_get_optional(dev, "te", GPIOD_IN);
++	/* The descriptor follows DSI attach/detach, not the panel devres life. */
++	dsi->te_gpio = gpiod_get_optional(dev, "te", GPIOD_IN);
+ 	if (!dsi->te_gpio)
+ 		return 0;
+ 	else if (IS_ERR(dsi->te_gpio))
+@@ -1875,6 +2147,7 @@ static int samsung_dsim_register_te_irq(struct samsung_dsim *dsi, struct device
+ 	if (ret) {
+ 		dev_err(dsi->dev, "request interrupt failed with %d\n", ret);
+ 		gpiod_put(dsi->te_gpio);
++		dsi->te_gpio = NULL;
+ 		return ret;
+ 	}
+ 
+@@ -1886,6 +2159,7 @@ static void samsung_dsim_unregister_te_irq(struct samsung_dsim *dsi)
+ 	if (dsi->te_gpio) {
+ 		free_irq(gpiod_to_irq(dsi->te_gpio), dsi);
+ 		gpiod_put(dsi->te_gpio);
++		dsi->te_gpio = NULL;
+ 	}
+ }
+ 
+@@ -2018,6 +2292,7 @@ static ssize_t samsung_dsim_host_transfer(struct mipi_dsi_host *host,
+ 					  const struct mipi_dsi_msg *msg)
+ {
+ 	struct samsung_dsim *dsi = host_to_dsi(host);
++	struct mipi_dsi_msg fixed_msg;
+ 	struct samsung_dsim_transfer xfer;
+ 	int ret;
+ 
+@@ -2028,6 +2303,19 @@ static ssize_t samsung_dsim_host_transfer(struct mipi_dsi_host *host,
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * Exynos8895 enters an unintended BTA cycle when DCS SET_TEAR_ON is
++	 * sent as a two-byte short packet.  Samsung's vendor driver sends this
++	 * one command as a long packet instead.
++	 */
++	if (dsi->plat_data->hw_type == DSIM_TYPE_EXYNOS8895 &&
++	    msg->type == MIPI_DSI_DCS_SHORT_WRITE_PARAM && msg->tx_len == 2 &&
++	    ((const u8 *)msg->tx_buf)[0] == MIPI_DCS_SET_TEAR_ON) {
++		fixed_msg = *msg;
++		fixed_msg.type = MIPI_DSI_DCS_LONG_WRITE;
++		msg = &fixed_msg;
++	}
++
+ 	ret = mipi_dsi_create_packet(&xfer.packet, msg);
+ 	if (ret < 0)
+ 		return ret;
+@@ -2122,6 +2410,45 @@ static const struct samsung_dsim_host_ops generic_dsim_host_ops = {
+ 	.unregister_host = generic_dsim_unregister_host,
+ };
+ 
++/*
++ * Keep the first hardware enablement observable and reversible.  Board
++ * bring-up can request only runtime-resume (regulators, clocks and PHY) over
++ * SSH before any panel transfer or video output is allowed to run.
++ */
++static ssize_t dsim_selftest_store(struct device *dev,
++				  struct device_attribute *attr,
++				  const char *buf, size_t count)
++{
++	struct samsung_dsim *dsi = dev_get_drvdata(dev);
++	int ret;
++
++	if (!sysfs_streq(buf, "power") && !sysfs_streq(buf, "status"))
++		return -EINVAL;
++
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++
++	if (sysfs_streq(buf, "power")) {
++		dev_info(dev, "DSIM self-test: clocks, PHY and power domain are on\n");
++	} else {
++		dev_info(dev,
++			 "DSIM status: swrst=%08x link=%08x dphy=%08x clk=%08x cfg=%08x int=%08x/%08x fifo=%08x\n",
++			 samsung_dsim_read(dsi, DSIM_SWRST_REG),
++			 samsung_dsim_read(dsi, DSIM_LINK_STATUS_REG),
++			 samsung_dsim_read(dsi, DSIM_DPHY_STATUS_REG),
++			 samsung_dsim_read(dsi, DSIM_CLKCTRL_REG),
++			 samsung_dsim_read(dsi, DSIM_CONFIG_REG),
++			 samsung_dsim_read(dsi, DSIM_INTSRC_REG),
++			 samsung_dsim_read(dsi, DSIM_INTMSK_REG),
++			 samsung_dsim_read(dsi, DSIM_FIFOCTRL_REG));
++	}
++	pm_runtime_put_sync(dev);
++
++	return count;
++}
++static DEVICE_ATTR_WO(dsim_selftest);
++
+ static const struct drm_bridge_timings samsung_dsim_bridge_timings_de_high = {
+ 	.input_bus_flags = DRM_BUS_FLAG_DE_HIGH,
+ };
+@@ -2169,6 +2496,14 @@ int samsung_dsim_probe(struct platform_device *pdev)
+ 	if (IS_ERR(dsi->reg_base))
+ 		return PTR_ERR(dsi->reg_base);
+ 
++	if (dsi->plat_data->hw_type == DSIM_TYPE_EXYNOS8895) {
++		dsi->sysreg = syscon_regmap_lookup_by_phandle(dev->of_node,
++							     "samsung,sysreg");
++		if (IS_ERR(dsi->sysreg))
++			return dev_err_probe(dev, PTR_ERR(dsi->sysreg),
++					     "failed to get DPU sysreg\n");
++	}
++
+ 	dsi->phy = devm_phy_optional_get(dev, "dsim");
+ 	if (IS_ERR(dsi->phy)) {
+ 		dev_info(dev, "failed to get dsim phy\n");
+@@ -2195,6 +2530,9 @@ int samsung_dsim_probe(struct platform_device *pdev)
+ 	platform_set_drvdata(pdev, dsi);
+ 
+ 	pm_runtime_enable(dev);
++	ret = device_create_file(dev, &dev_attr_dsim_selftest);
++	if (ret)
++		goto err_disable_runtime;
+ 
+ 	dsi->bridge.of_node = dev->of_node;
+ 	dsi->bridge.type = DRM_MODE_CONNECTOR_DSI;
+@@ -2214,6 +2552,7 @@ int samsung_dsim_probe(struct platform_device *pdev)
+ 	return 0;
+ 
+ err_disable_runtime:
++	device_remove_file(dev, &dev_attr_dsim_selftest);
+ 	pm_runtime_disable(dev);
+ 
+ 	return ret;
+@@ -2224,6 +2563,7 @@ void samsung_dsim_remove(struct platform_device *pdev)
+ {
+ 	struct samsung_dsim *dsi = platform_get_drvdata(pdev);
+ 
++	device_remove_file(&pdev->dev, &dev_attr_dsim_selftest);
+ 	pm_runtime_disable(&pdev->dev);
+ 
+ 	if (dsi->plat_data->host_ops && dsi->plat_data->host_ops->unregister_host)
+@@ -2242,9 +2582,15 @@ static int samsung_dsim_suspend(struct device *dev)
+ 	if (dsi->state & DSIM_STATE_INITIALIZED) {
+ 		dsi->state &= ~DSIM_STATE_INITIALIZED;
+ 
+-		samsung_dsim_disable_clock(dsi);
+-
+-		samsung_dsim_disable_irq(dsi);
++		if (dsi->plat_data->hw_type == DSIM_TYPE_EXYNOS8895) {
++			samsung_dsim_write(dsi, DSIM_INTMSK_REG, 0xffffffff);
++			samsung_dsim_write(dsi, DSIM_INTSRC_REG, 0xffffffff);
++			samsung_dsim_disable_irq(dsi);
++			samsung_dsim_disable_clock(dsi);
++		} else {
++			samsung_dsim_disable_clock(dsi);
++			samsung_dsim_disable_irq(dsi);
++		}
+ 	}
+ 
+ 	dsi->state &= ~DSIM_STATE_CMD_LPM;
+diff --git a/drivers/gpu/drm/exynos/Kconfig b/drivers/gpu/drm/exynos/Kconfig
+index a59131ae1..ee3a41b06 100644
+--- a/drivers/gpu/drm/exynos/Kconfig
++++ b/drivers/gpu/drm/exynos/Kconfig
+@@ -36,6 +36,13 @@ config DRM_EXYNOS7_DECON
+ 	help
+ 	  Choose this option if you want to use Exynos DECON for DRM.
+ 
++config DRM_EXYNOS8895_DECON
++	bool "DECON0 on Exynos8895"
++	depends on !FB_S3C
++	help
++	  Choose this option to use the Exynos8895 DECON0 and IDMA_G1
++	  scanout path with the Exynos DRM MIPI-DSI host.
++
+ config DRM_EXYNOS_MIXER
+ 	bool "Mixer"
+ 	help
+@@ -58,7 +65,7 @@ config DRM_EXYNOS_DPI
+ 
+ config DRM_EXYNOS_DSI
+ 	bool "MIPI-DSI host"
+-	depends on DRM_EXYNOS_FIMD || DRM_EXYNOS5433_DECON || DRM_EXYNOS7_DECON
++	depends on DRM_EXYNOS_FIMD || DRM_EXYNOS5433_DECON || DRM_EXYNOS7_DECON || DRM_EXYNOS8895_DECON
+ 	select DRM_MIPI_DSI
+ 	select DRM_PANEL
+ 	select DRM_SAMSUNG_DSIM
+diff --git a/drivers/gpu/drm/exynos/Makefile b/drivers/gpu/drm/exynos/Makefile
+index 2fd2f3ee4..13714bb69 100644
+--- a/drivers/gpu/drm/exynos/Makefile
++++ b/drivers/gpu/drm/exynos/Makefile
+@@ -10,6 +10,7 @@ exynosdrm-$(CONFIG_DRM_FBDEV_EMULATION) += exynos_drm_fbdev.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS_FIMD)	+= exynos_drm_fimd.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS5433_DECON)	+= exynos5433_drm_decon.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS7_DECON)	+= exynos7_drm_decon.o
++exynosdrm-$(CONFIG_DRM_EXYNOS8895_DECON) += exynos8895_drm_decon.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS_DPI)	+= exynos_drm_dpi.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS_DSI)	+= exynos_drm_dsi.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS_DP)	+= exynos_dp.o
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_drv.c b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+index 9ee300868..6d3204e8e 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_drv.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+@@ -7,6 +7,7 @@
+  *	Seung-Woo Kim <sw0312.kim@samsung.com>
+  */
+ 
++#include <linux/aperture.h>
+ #include <linux/component.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/platform_device.h>
+@@ -167,6 +168,9 @@ static struct exynos_drm_driver_info exynos_drm_drivers[] = {
+ 	}, {
+ 		DRV_PTR(decon_driver, CONFIG_DRM_EXYNOS7_DECON),
+ 		DRM_COMPONENT_DRIVER
++	}, {
++		DRV_PTR(exynos8895_decon_driver, CONFIG_DRM_EXYNOS8895_DECON),
++		DRM_COMPONENT_DRIVER
+ 	}, {
+ 		DRV_PTR(mixer_driver, CONFIG_DRM_EXYNOS_MIXER),
+ 		DRM_COMPONENT_DRIVER
+@@ -277,6 +281,11 @@ static int exynos_drm_bind(struct device *dev)
+ 	if (ret)
+ 		goto err_unbind_all;
+ 
++	/* Native KMS is ready; retire simpledrm before exposing this device. */
++	ret = aperture_remove_all_conflicting_devices(DRIVER_NAME);
++	if (ret)
++		goto err_unbind_all;
++
+ 	drm_mode_config_reset(drm);
+ 
+ 	/* init kms poll for handling hpd */
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_drv.h b/drivers/gpu/drm/exynos/exynos_drm_drv.h
+index b126cd129..a52232dbf 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_drv.h
++++ b/drivers/gpu/drm/exynos/exynos_drm_drv.h
+@@ -249,6 +249,7 @@ static inline int exynos_drm_check_fimc_device(struct device *dev)
+ extern struct platform_driver fimd_driver;
+ extern struct platform_driver exynos5433_decon_driver;
+ extern struct platform_driver decon_driver;
++extern struct platform_driver exynos8895_decon_driver;
+ extern struct platform_driver dp_driver;
+ extern struct platform_driver dsi_driver;
+ extern struct platform_driver mixer_driver;
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_dsi.c b/drivers/gpu/drm/exynos/exynos_drm_dsi.c
+index c4d098ab7..9c9b33be5 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_dsi.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_dsi.c
+@@ -39,11 +39,14 @@ static int exynos_dsi_host_attach(struct samsung_dsim *dsim,
+ 	struct exynos_dsi *dsi = dsim->priv;
+ 	struct drm_encoder *encoder = &dsi->encoder;
+ 	struct drm_device *drm = encoder->dev;
++	int ret;
+ 
+-	drm_bridge_attach(encoder, &dsim->bridge,
+-			  list_first_entry_or_null(&encoder->bridge_chain,
+-						   struct drm_bridge,
+-						   chain_node), 0);
++	ret = drm_bridge_attach(encoder, &dsim->bridge,
++				list_first_entry_or_null(&encoder->bridge_chain,
++							 struct drm_bridge,
++							 chain_node), 0);
++	if (ret)
++		return ret;
+ 
+ 	mutex_lock(&drm->mode_config.mutex);
+ 
+@@ -79,7 +82,9 @@ static int exynos_dsi_bind(struct device *dev, struct device *master, void *data
+ 	struct drm_device *drm_dev = data;
+ 	int ret;
+ 
+-	drm_simple_encoder_init(drm_dev, encoder, DRM_MODE_ENCODER_TMDS);
++	ret = drm_simple_encoder_init(drm_dev, encoder, DRM_MODE_ENCODER_TMDS);
++	if (ret)
++		return ret;
+ 
+ 	ret = exynos_drm_set_possible_crtcs(encoder, EXYNOS_DISPLAY_TYPE_LCD);
+ 	if (ret < 0)
+@@ -159,6 +164,11 @@ static const struct samsung_dsim_plat_data exynos7870_dsi_pdata = {
+ 	.host_ops = &exynos_dsi_exynos_host_ops,
+ };
+ 
++static const struct samsung_dsim_plat_data exynos8895_dsi_pdata = {
++	.hw_type = DSIM_TYPE_EXYNOS8895,
++	.host_ops = &exynos_dsi_exynos_host_ops,
++};
++
+ static const struct of_device_id exynos_dsi_of_match[] = {
+ 	{
+ 		.compatible = "samsung,exynos3250-mipi-dsi",
+@@ -184,6 +194,10 @@ static const struct of_device_id exynos_dsi_of_match[] = {
+ 		.compatible = "samsung,exynos7870-mipi-dsi",
+ 		.data = &exynos7870_dsi_pdata,
+ 	},
++	{
++		.compatible = "samsung,exynos8895-mipi-dsi",
++		.data = &exynos8895_dsi_pdata,
++	},
+ 	{ /* sentinel. */ }
+ };
+ MODULE_DEVICE_TABLE(of, exynos_dsi_of_match);
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+index 3eac4d0f8..3d01b2e9b 100644
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -950,6 +950,14 @@ config DRM_PANEL_SAMSUNG_S6E3HA2
+ 	depends on BACKLIGHT_CLASS_DEVICE
+ 	select VIDEOMODE_HELPERS
+ 
++config DRM_PANEL_SAMSUNG_S6E3HA6
++	tristate "Samsung S6E3HA6 command-mode AMOLED panel"
++	depends on GPIOLIB && OF
++	depends on DRM_MIPI_DSI
++	help
++	  Say Y or M here to enable the 1440x2960 Samsung S6E3HA6 AMOLED
++	  panel used by the Galaxy S8 (dreamlte).
++
+ config DRM_PANEL_SAMSUNG_S6E3HA8
+ 	tristate "Samsung S6E3HA8 DSI video mode panel"
+ 	depends on GPIOLIB
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+index c2c5cf817..90468d877 100644
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -92,6 +92,7 @@ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6D7AA0) += panel-samsung-s6d7aa0.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3FA7) += panel-samsung-s6e3fa7.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3FC2X01) += panel-samsung-s6e3fc2x01.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HA2) += panel-samsung-s6e3ha2.o
++obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HA6) += panel-samsung-s6e3ha6.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HA8) += panel-samsung-s6e3ha8.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E63J0X03) += panel-samsung-s6e63j0x03.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E63M0) += panel-samsung-s6e63m0.o
 diff --git a/drivers/mmc/host/dw_mmc-exynos.c b/drivers/mmc/host/dw_mmc-exynos.c
 index 4b76b997d..9b3141534 100644
 --- a/drivers/mmc/host/dw_mmc-exynos.c
@@ -866,6 +1909,51 @@ index 342682638..c7910f762 100644
  obj-$(CONFIG_PHY_EXYNOS5_USBDRD)	+= phy-exynos5-usbdrd.o
 +obj-$(CONFIG_PHY_EXYNOS8895_USBDRD)	+= phy-exynos8895-usbdrd.o
  obj-$(CONFIG_PHY_EXYNOS5250_SATA)	+= phy-exynos5250-sata.o
+diff --git a/drivers/phy/samsung/phy-exynos-mipi-video.c b/drivers/phy/samsung/phy-exynos-mipi-video.c
+index be925508e..cbfbab824 100644
+--- a/drivers/phy/samsung/phy-exynos-mipi-video.c
++++ b/drivers/phy/samsung/phy-exynos-mipi-video.c
+@@ -262,6 +262,30 @@ static const struct mipi_phy_device_desc exynos7870_mipi_phy = {
+ 	},
+ };
+ 
++/*
++ * Exynos8895 has one display D-PHY.  Unlike Exynos7870, its reset is
++ * controlled by the DSIM block itself; only the PMU isolation bit is owned
++ * by the generic PHY provider.  Keep slot zero as an unused placeholder so
++ * DSIM0 can retain the conventional PHY index one.
++ */
++static const struct mipi_phy_device_desc exynos8895_mipi_phy = {
++	.num_regmaps = 1,
++	.regmap_names = { "samsung,pmu-syscon" },
++	.num_phys = 2,
++	.phys = {
++		{
++			.coupled_phy_id = EXYNOS_MIPI_PHY_ID_NONE,
++		}, {
++			/* EXYNOS_MIPI_PHY_ID_DSIM0 */
++			.coupled_phy_id = EXYNOS_MIPI_PHY_ID_NONE,
++			.enable_val = EXYNOS4_PHY_ENABLE,
++			.enable_reg = EXYNOS4_MIPI_PHY_CONTROL(0),
++			.enable_map = EXYNOS_MIPI_REGMAP_PMU,
++			.resetn_map = EXYNOS_MIPI_REGMAP_PMU,
++		},
++	},
++};
++
+ struct exynos_mipi_video_phy {
+ 	struct regmap *regmaps[EXYNOS_MIPI_REGMAPS_NUM];
+ 	int num_phys;
+@@ -403,6 +427,9 @@ static const struct of_device_id exynos_mipi_video_phy_of_match[] = {
+ 	}, {
+ 		.compatible = "samsung,exynos7870-mipi-video-phy",
+ 		.data = &exynos7870_mipi_phy,
++	}, {
++		.compatible = "samsung,exynos8895-mipi-video-phy",
++		.data = &exynos8895_mipi_phy,
+ 	},
+ 	{ /* sentinel */ },
+ };
 diff --git a/drivers/phy/samsung/phy-exynos5-usbdrd.c b/drivers/phy/samsung/phy-exynos5-usbdrd.c
 index 8711a3b62..2a9742596 100644
 --- a/drivers/phy/samsung/phy-exynos5-usbdrd.c
@@ -1644,6 +2732,37 @@ index f2c2e744e..89465f5b4 100644
  extern const struct samsung_ufs_phy_drvdata exynosautov9_ufs_phy;
  extern const struct samsung_ufs_phy_drvdata exynosautov920_ufs_phy;
  extern const struct samsung_ufs_phy_drvdata fsd_ufs_phy;
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index f0ede1cec..e525d66e0 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -459,6 +459,14 @@ config BATTERY_MAX17042
+ 
+ 	  Driver can be build as a module (max17042_battery).
+ 
++config BATTERY_MAX77865
++	tristate "Maxim MAX77854/MAX77865 battery monitor"
++	depends on I2C
++	help
++	  Say Y here to expose the MAX77854/MAX77865 fuel gauge and charger
++	  state through the power-supply class. The driver is read-only and
++	  does not change charging policy.
++
+ config BATTERY_MAX1720X
+ 	tristate "Maxim MAX17201/MAX17205 Fuel Gauge"
+ 	depends on I2C
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 31fe4a145..431633943 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -58,6 +58,7 @@ obj-$(CONFIG_CHARGER_DA9150)	+= da9150-charger.o
+ obj-$(CONFIG_BATTERY_DA9150)	+= da9150-fg.o
+ obj-$(CONFIG_BATTERY_MAX17040)	+= max17040_battery.o
+ obj-$(CONFIG_BATTERY_MAX17042)	+= max17042_battery.o
++obj-$(CONFIG_BATTERY_MAX77865)	+= max77865_battery.o
+ obj-$(CONFIG_BATTERY_MAX1720X)	+= max1720x_battery.o
+ obj-$(CONFIG_BATTERY_MAX1721X)	+= max1721x_battery.o
+ obj-$(CONFIG_BATTERY_RT5033)	+= rt5033_battery.o
 diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
 index 13e6357a8..72ee77984 100644
 --- a/drivers/ufs/core/ufshcd.c
@@ -2084,14 +3203,86 @@ index e934f94e8..abdf2cef1 100644
  	}, {
  		.compatible = "samsung,exynos7-dwusb3",
  		.data = &exynos7_drvdata,
+diff --git a/drivers/usb/typec/Kconfig b/drivers/usb/typec/Kconfig
+index 2f80c2792..ffc6af421 100644
+--- a/drivers/usb/typec/Kconfig
++++ b/drivers/usb/typec/Kconfig
+@@ -110,6 +110,15 @@ config TYPEC_WUSB3801
+ 	  If you choose to build this driver as a dynamically linked module, the
+ 	  module will be called wusb3801.ko.
+ 
++config TYPEC_S2MM005
++	tristate "Samsung S2MM005 USB-C CCIC bring-up driver"
++	depends on I2C
++	default m
++	help
++	  Say Y or M here for the Samsung S2MM005 Type-C/PD controller.
++	  The initial driver is intended for Exynos8895 bring-up: it performs
++	  the controller wake/reset sequence and reports CCIC IRQ state.
++
+ source "drivers/usb/typec/mux/Kconfig"
+ 
+ source "drivers/usb/typec/altmodes/Kconfig"
+diff --git a/drivers/usb/typec/Makefile b/drivers/usb/typec/Makefile
+index 8a6a1c663..91096eae0 100644
+--- a/drivers/usb/typec/Makefile
++++ b/drivers/usb/typec/Makefile
+@@ -11,4 +11,5 @@ obj-$(CONFIG_TYPEC_HD3SS3220)	+= hd3ss3220.o
+ obj-$(CONFIG_TYPEC_STUSB160X) 	+= stusb160x.o
+ obj-$(CONFIG_TYPEC_RT1719)	+= rt1719.o
+ obj-$(CONFIG_TYPEC_WUSB3801)	+= wusb3801.o
++obj-$(CONFIG_TYPEC_S2MM005)	+= s2mm005.o
+ obj-$(CONFIG_TYPEC)		+= mux/
+diff --git a/include/drm/bridge/samsung-dsim.h b/include/drm/bridge/samsung-dsim.h
+index 03005e474..02a74f038 100644
+--- a/include/drm/bridge/samsung-dsim.h
++++ b/include/drm/bridge/samsung-dsim.h
+@@ -30,13 +30,14 @@ enum samsung_dsim_type {
+ 	DSIM_TYPE_EXYNOS5422,
+ 	DSIM_TYPE_EXYNOS5433,
+ 	DSIM_TYPE_EXYNOS7870,
++	DSIM_TYPE_EXYNOS8895,
+ 	DSIM_TYPE_IMX8MM,
+ 	DSIM_TYPE_IMX8MP,
+ 	DSIM_TYPE_COUNT,
+ };
+ 
+ #define samsung_dsim_hw_is_exynos(hw) \
+-	((hw) >= DSIM_TYPE_EXYNOS3250 && (hw) <= DSIM_TYPE_EXYNOS5433)
++	((hw) >= DSIM_TYPE_EXYNOS3250 && (hw) <= DSIM_TYPE_EXYNOS8895)
+ 
+ struct samsung_dsim_transfer {
+ 	struct list_head list;
+@@ -106,6 +107,7 @@ struct samsung_dsim {
+ 	void __iomem *reg_base;
+ 	struct phy *phy;
+ 	struct clk *pll_clk;
++	struct regmap *sysreg;
+ 	struct regulator_bulk_data supplies[2];
+ 	int irq;
+ 	struct gpio_desc *te_gpio;
 diff --git a/include/dt-bindings/clock/samsung,exynos8895.h b/include/dt-bindings/clock/samsung,exynos8895.h
-index 27998c53f..0f8016d8e 100644
+index 27998c53f..ceb019567 100644
 --- a/include/dt-bindings/clock/samsung,exynos8895.h
 +++ b/include/dt-bindings/clock/samsung,exynos8895.h
-@@ -450,4 +450,21 @@
+@@ -450,4 +450,35 @@
  #define CLK_GOUT_PERIC1_USI13_I_SCLK_USI		63
  #define CLK_GOUT_PERIC1_XIU_P_PERIC1_ACLK		64
  
++/* CMU_DPU0 */
++#define CLK_MOUT_DPU0_BUS_USER				1
++#define CLK_GOUT_DPU0_BUSD				2
++#define CLK_DOUT_DPU0_BUSP				3
++#define CLK_GOUT_DPU0_BUSP				4
++#define CLK_GOUT_DPU0_CMU_DPU0_PCLK			5
++#define CLK_GOUT_DPU0_DSIM0_PCLK			6
++#define CLK_GOUT_DPU0_DECON0_ACLK			7
++#define CLK_GOUT_DPU0_DECON0_PCLKM			8
++#define CLK_GOUT_DPU0_DECON0_PCLKS			9
++#define CLK_GOUT_DPU0_DPP_PCLKM			10
++#define CLK_GOUT_DPU0_DPP_PCLKS			11
++#define CLK_GOUT_DPU0_DPP_G1_ACLK			12
++
 +/* CMU_G3D */
 +#define CLK_FOUT_G3D_PLL				1
 +#define CLK_MOUT_G3D_SWITCH_USER			2
@@ -2128,3 +3319,1888 @@ index 248d0a5be..7982846a9 100644
  	int	(*phy_initialization)(struct ufs_hba *);
  	int	(*device_reset)(struct ufs_hba *hba);
  	void	(*config_scaling_param)(struct ufs_hba *hba,
+diff --git a/drivers/gpu/drm/exynos/exynos8895_drm_decon.c b/drivers/gpu/drm/exynos/exynos8895_drm_decon.c
+new file mode 100644
+index 000000000..46e05bf5b
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos8895_drm_decon.c
+@@ -0,0 +1,888 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Minimal DRM/KMS scanout driver for Exynos8895 DECON0.
++ *
++ * Galaxy S8 (dreamlte) uses this fixed command-mode path:
++ *   IDMA_G1 -> DPP_G1 -> DECON0 -> DSC0/1 -> DSIM0 -> S6E3HA6
++ */
++
++#include <linux/clk.h>
++#include <linux/component.h>
++#include <linux/dma-mapping.h>
++#include <linux/iopoll.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++
++#include <drm/drm_fourcc.h>
++#include <drm/drm_framebuffer.h>
++#include <drm/drm_print.h>
++#include <drm/drm_vblank.h>
++#include <drm/exynos_drm.h>
++
++#include "exynos_drm_crtc.h"
++#include "exynos_drm_drv.h"
++#include "exynos_drm_fb.h"
++#include "exynos_drm_plane.h"
++
++#define EXYNOS8895_WIDTH			1440
++#define EXYNOS8895_HEIGHT			2960
++#define EXYNOS8895_DSC_WIDTH			240
++#define EXYNOS8895_DSI_WIDTH			480
++
++/* DPU0 display sysreg. */
++#define SYSREG_DISP_LPMUX_CFG			0x0000
++#define SYSREG_DISP_DLMUX_CFG			0x0004
++#define SYSREG_DISP_TE_SEL			0x000c
++#define SYSREG_DLMUX_MASK			0x00033077
++#define SYSREG_DLMUX_DECON0_DSIM0		0x00010041
++
++/* DECON0. */
++#define DECON_GLOBAL_CONTROL			0x0000
++#define DECON_GLOBAL_SRESET			BIT(28)
++#define DECON_GLOBAL_I80IF			BIT(8)
++#define DECON_GLOBAL_RUN_STATUS			BIT(4)
++#define DECON_GLOBAL_ENABLE			BIT(1)
++#define DECON_GLOBAL_ENABLE_F			BIT(0)
++#define DECON_SRAM_SHARE_ENABLE			0x0030
++#define DECON_SRAM_FIFO_8K			(BIT(24) | BIT(12))
++#define DECON_INTERRUPT_ENABLE			0x0040
++#define DECON_FRAME_DONE_INT_EN			BIT(13)
++#define DECON_INT_EN				BIT(0)
++#define DECON_INTERRUPT_ENABLE_MASK		0x03303711
++#define DECON_EXTRA_INTERRUPT_ENABLE		0x0044
++#define DECON_EXTRA_INTERRUPT_MASK		0x00000111
++#define DECON_INTERRUPT_PENDING			0x004c
++#define DECON_FRAME_DONE_INT_PEND		BIT(13)
++#define DECON_INTERRUPT_PENDING_ALL		0x03303110
++#define DECON_EXTRA_INTERRUPT_PENDING		0x0050
++#define DECON_SHADOW_UPDATE			0x0060
++#define DECON_SHADOW_UPDATE_GLOBAL		BIT(31)
++#define DECON_SHADOW_UPDATE_WIN(win)		BIT(win)
++#define DECON_TRIGGER_CONTROL			0x0070
++#define DECON_TRIGGER_MASK			BIT(4)
++#define DECON_TRIGGER_ENABLE			BIT(0)
++#define DECON_CLOCK_CONTROL			0x00f0
++#define DECON_CLOCK_CONTROL_MASK		0x00511101
++
++#define DECON_SPLITTER_SIZE			0x0100
++#define DECON_SPLITTER_PIXEL_COUNT		0x0104
++#define DECON_SPLITTER_INDEX			0x0108
++#define DECON_SPLITTER_OVERLAP			0x010c
++#define DECON_FIFO0_SIZE			0x0120
++#define DECON_FIFO0_PIXEL_COUNT			0x0124
++#define DECON_FIFO1_SIZE			0x0128
++#define DECON_FIFO1_PIXEL_COUNT			0x012c
++#define DECON_FIFO_THRESHOLD			0x0130
++#define DECON_FORMATTER_CONTROL			0x0190
++#define DECON_FORMATTER_RGB_ORDER_MASK		GENMASK(6, 4)
++#define DECON_FORMATTER0_SIZE			0x01a0
++#define DECON_FORMATTER0_PIXEL_COUNT		0x01a4
++#define DECON_BG_SIZE				0x0200
++#define DECON_BG_PIXEL_COUNT			0x0204
++#define DECON_DATA_PATH_CONTROL0		0x0214
++#define DECON_WIN_ENABLE(win)			BIT(4 * (win))
++#define DECON_DATA_PATH_CONTROL1		0x0218
++#define DECON_WIN_CHMAP(win, channel)		(((channel) & 0x7) << (4 * (win)))
++#define DECON_WIN_CHMAP_MASK(win)		(0x7 << (4 * (win)))
++#define DECON_DATA_PATH_CONTROL2		0x0230
++#define DECON_DATA_PATH_DUAL_DSC_DSIM0		0x000000b1
++
++#define DECON_WIN_CONTROL0(win)		(0x1000 + (win) * 0x30)
++#define DECON_WIN_CONTROL1(win)		(0x1004 + (win) * 0x30)
++#define DECON_WIN_START(win)			(0x1008 + (win) * 0x30)
++#define DECON_WIN_END(win)			(0x100c + (win) * 0x30)
++#define DECON_WIN_START_TIME(win)		(0x1018 + (win) * 0x30)
++#define DECON_WIN_PIXEL_COUNT(win)		(0x101c + (win) * 0x30)
++#define DECON_WIN_ALPHA0(value)		((u32)(value) << 16)
++#define DECON_WIN_ALPHA1(value)		((u32)(value) << 24)
++#define DECON_WIN_FUNC_COPY			(1 << 8)
++#define DECON_IDMA_G1_CHANNEL			3
++
++/* The two DSC encoders have identical register files. */
++#define DECON_DSC0				0x4000
++#define DECON_DSC1				0x5000
++#define DSC_CONTROL0				0x0000
++#define DSC_PPS04_07				0x0024
++#define DSC_PPS08_11				0x0028
++#define DSC_PPS12_15				0x002c
++#define DSC_PPS16_19				0x0030
++#define DSC_PPS20_23				0x0034
++#define DSC_PPS24_27				0x0038
++#define DSC_PPS28_31				0x003c
++#define DSC_PPS32_35				0x0040
++#define DSC_PPS56_59				0x0058
++#define DSC_PPS76_79				0x006c
++#define DSC_PPS80_83				0x0070
++#define DSC_PPS84_87				0x0074
++#define DSC_CONTROL0_DREAMLTE			0x000f022a
++
++/* DPU DMA common block. */
++#define DMA_COMMON_CH_MAP			0x0004
++#define DMA_COMMON_G1_CH_MASK			GENMASK(5, 4)
++#define DMA_COMMON_G1_TO_CH2			(2 << 4)
++#define DMA_COMMON_CLOCK_GATING			0x0014
++#define DMA_COMMON_CLOCK_GATING_MASK		0x00010fff
++
++/* IDMA_G1. */
++#define IDMA_ENABLE				0x0000
++#define IDMA_CLOCK_GATING_MASK			GENMASK(10, 9)
++#define IDMA_IRQ				0x0004
++#define IDMA_IRQ_MASK_ALL			(0xfb << 1)
++#define IDMA_IN_CON				0x0008
++#define IDMA_IN_IC_MAX				(0x10 << 19)
++#define IDMA_FORMAT(value)			((value) << 11)
++#define IDMA_OUT_CON				0x000c
++#define IDMA_FRAME_ALPHA(value)		((u32)(value) << 24)
++#define IDMA_SRC_SIZE				0x0010
++#define IDMA_SRC_OFFSET				0x0014
++#define IDMA_IMG_SIZE				0x0018
++#define IDMA_QOS_LUT0				0x0034
++#define IDMA_QOS_LUT1				0x0038
++#define IDMA_BASE_ADDR_Y			0x0040
++#define IDMA_DYNAMIC_GATING			0x0058
++#define IDMA_DYNAMIC_GATING_ALL			0x0000007f
++#define IDMA_RECOVERY_CONTROL			0x005c
++#define IDMA_INITIAL_RECOVERY_NUM		(630000 << 1)
++
++/* DPP_G1. */
++#define DPP_ENABLE				0x0000
++#define DPP_CLOCK_GATING_MASK			GENMASK(10, 8)
++#define DPP_IRQ				0x0004
++#define DPP_IRQ_MASK_ALL			(0x21 << 1)
++#define DPP_IN_CON				0x0008
++#define DPP_ALPHA_PER_PIXEL			BIT(10)
++#define DPP_IMG_SIZE				0x0018
++#define DPP_DYNAMIC_GATING			0x0a54
++#define DPP_DYNAMIC_GATING_ALL			0x0000005f
++
++#define HW_SIZE(width, height)			(((height) << 16) | (width))
++#define HW_POSITION(x, y)			(((y) << 16) | (x))
++
++enum exynos8895_decon_clk {
++	DECON_ACLK,
++	DECON_PCLKM,
++	DECON_PCLKS,
++	DPP_ACLK,
++	DPP_PCLKM,
++	DPP_PCLKS,
++	DECON_NUM_CLKS,
++};
++
++struct exynos8895_decon {
++	struct device *dev;
++	struct drm_device *drm_dev;
++	void *dma_priv;
++	void __iomem *regs;
++	void __iomem *dpp;
++	void __iomem *idma;
++	void __iomem *dma_common;
++	struct regmap *sysreg;
++	struct clk_bulk_data clks[DECON_NUM_CLKS];
++	struct exynos_drm_crtc *crtc;
++	struct exynos_drm_plane plane;
++	struct exynos_drm_plane_config plane_config;
++	int irq;
++	bool irq_enabled;
++	bool active;
++};
++
++static const uint32_t exynos8895_formats[] = {
++	DRM_FORMAT_RGB565,
++	DRM_FORMAT_XRGB8888,
++	DRM_FORMAT_XBGR8888,
++	DRM_FORMAT_RGBX8888,
++	DRM_FORMAT_BGRX8888,
++	DRM_FORMAT_ARGB8888,
++	DRM_FORMAT_ABGR8888,
++	DRM_FORMAT_RGBA8888,
++	DRM_FORMAT_BGRA8888,
++};
++
++static inline u32 decon_read(struct exynos8895_decon *ctx, u32 reg)
++{
++	return readl(ctx->regs + reg);
++}
++
++static inline void decon_write(struct exynos8895_decon *ctx, u32 reg, u32 val)
++{
++	writel(val, ctx->regs + reg);
++}
++
++static void decon_update_bits(struct exynos8895_decon *ctx, u32 reg,
++			      u32 mask, u32 val)
++{
++	u32 tmp = decon_read(ctx, reg);
++
++	decon_write(ctx, reg, (tmp & ~mask) | (val & mask));
++}
++
++static inline u32 idma_read(struct exynos8895_decon *ctx, u32 reg)
++{
++	return readl(ctx->idma + reg);
++}
++
++static inline void idma_write(struct exynos8895_decon *ctx, u32 reg, u32 val)
++{
++	writel(val, ctx->idma + reg);
++}
++
++static void idma_update_bits(struct exynos8895_decon *ctx, u32 reg,
++			     u32 mask, u32 val)
++{
++	u32 tmp = idma_read(ctx, reg);
++
++	idma_write(ctx, reg, (tmp & ~mask) | (val & mask));
++}
++
++static inline u32 dpp_read(struct exynos8895_decon *ctx, u32 reg)
++{
++	return readl(ctx->dpp + reg);
++}
++
++static inline void dpp_write(struct exynos8895_decon *ctx, u32 reg, u32 val)
++{
++	writel(val, ctx->dpp + reg);
++}
++
++static void dpp_update_bits(struct exynos8895_decon *ctx, u32 reg,
++			    u32 mask, u32 val)
++{
++	u32 tmp = dpp_read(ctx, reg);
++
++	dpp_write(ctx, reg, (tmp & ~mask) | (val & mask));
++}
++
++static inline u32 dma_common_read(struct exynos8895_decon *ctx, u32 reg)
++{
++	return readl(ctx->dma_common + reg);
++}
++
++static void dma_common_update_bits(struct exynos8895_decon *ctx, u32 reg,
++				   u32 mask, u32 val)
++{
++	u32 tmp = dma_common_read(ctx, reg);
++
++	writel((tmp & ~mask) | (val & mask), ctx->dma_common + reg);
++}
++
++static void decon_shadow_update(struct exynos8895_decon *ctx)
++{
++	/* Window registers have their own shadow-request bits on Exynos8895. */
++	decon_write(ctx, DECON_SHADOW_UPDATE,
++		    DECON_SHADOW_UPDATE_GLOBAL | DECON_SHADOW_UPDATE_WIN(0));
++}
++
++static void decon_trigger(struct exynos8895_decon *ctx, bool enable)
++{
++	u32 val = enable ? DECON_TRIGGER_ENABLE : DECON_TRIGGER_MASK;
++
++	decon_update_bits(ctx, DECON_TRIGGER_CONTROL,
++			  DECON_TRIGGER_ENABLE | DECON_TRIGGER_MASK, val);
++}
++
++static u32 idma_format(u32 format)
++{
++	switch (format) {
++	case DRM_FORMAT_ARGB8888:
++		return IDMA_FORMAT(0);
++	case DRM_FORMAT_ABGR8888:
++		return IDMA_FORMAT(1);
++	case DRM_FORMAT_RGBA8888:
++		return IDMA_FORMAT(2);
++	case DRM_FORMAT_BGRA8888:
++		return IDMA_FORMAT(3);
++	case DRM_FORMAT_XRGB8888:
++		return IDMA_FORMAT(4);
++	case DRM_FORMAT_XBGR8888:
++		return IDMA_FORMAT(5);
++	case DRM_FORMAT_RGBX8888:
++		return IDMA_FORMAT(6);
++	case DRM_FORMAT_BGRX8888:
++		return IDMA_FORMAT(7);
++	case DRM_FORMAT_RGB565:
++		return IDMA_FORMAT(8);
++	default:
++		return IDMA_FORMAT(4);
++	}
++}
++
++static bool format_has_alpha(u32 format)
++{
++	return format == DRM_FORMAT_ARGB8888 ||
++	       format == DRM_FORMAT_ABGR8888 ||
++	       format == DRM_FORMAT_RGBA8888 ||
++	       format == DRM_FORMAT_BGRA8888;
++}
++
++static void decon_dsc_program(struct exynos8895_decon *ctx, u32 base)
++{
++	u32 val;
++
++	/* Two encoders, one 720x40 slice per encoder, 8 bpc and 8 bpp. */
++	decon_write(ctx, base + DSC_CONTROL0, DSC_CONTROL0_DREAMLTE);
++	decon_write(ctx, base + DSC_PPS04_07, 0x30800b90);
++	decon_write(ctx, base + DSC_PPS08_11, 0x02d00028);
++	decon_write(ctx, base + DSC_PPS12_15, 0x02d002d0);
++	decon_write(ctx, base + DSC_PPS16_19, 0x020001b4);
++	decon_write(ctx, base + DSC_PPS20_23, 0x0020046c);
++	decon_write(ctx, base + DSC_PPS24_27, 0x000a000c);
++	decon_write(ctx, base + DSC_PPS28_31, 0x027701e9);
++	decon_write(ctx, base + DSC_PPS32_35, 0x180010f0);
++	val = decon_read(ctx, base + DSC_PPS56_59);
++	decon_write(ctx, base + DSC_PPS56_59, (val & 0xffff0000) | 0x0102);
++	decon_write(ctx, base + DSC_PPS76_79, 0x1ab62af6);
++	decon_write(ctx, base + DSC_PPS80_83, 0x2b342b74);
++	decon_write(ctx, base + DSC_PPS84_87, 0x3b746bf4);
++}
++
++static int decon_route_display(struct exynos8895_decon *ctx)
++{
++	int ret;
++
++	ret = regmap_write(ctx->sysreg, SYSREG_DISP_LPMUX_CFG, 0x1201);
++	if (ret)
++		return ret;
++	ret = regmap_update_bits(ctx->sysreg, SYSREG_DISP_DLMUX_CFG,
++				 SYSREG_DLMUX_MASK, SYSREG_DLMUX_DECON0_DSIM0);
++	if (ret)
++		return ret;
++
++	return regmap_write(ctx->sysreg, SYSREG_DISP_TE_SEL, 0x7);
++}
++
++static void dpp_hw_init(struct exynos8895_decon *ctx)
++{
++	dma_common_update_bits(ctx, DMA_COMMON_CH_MAP,
++			       DMA_COMMON_G1_CH_MASK, DMA_COMMON_G1_TO_CH2);
++	dma_common_update_bits(ctx, DMA_COMMON_CLOCK_GATING,
++			       DMA_COMMON_CLOCK_GATING_MASK,
++			       DMA_COMMON_CLOCK_GATING_MASK);
++
++	idma_write(ctx, IDMA_IRQ, IDMA_IRQ_MASK_ALL);
++	dpp_write(ctx, DPP_IRQ, DPP_IRQ_MASK_ALL);
++	idma_update_bits(ctx, IDMA_ENABLE, IDMA_CLOCK_GATING_MASK,
++			 IDMA_CLOCK_GATING_MASK);
++	dpp_update_bits(ctx, DPP_ENABLE, DPP_CLOCK_GATING_MASK,
++			DPP_CLOCK_GATING_MASK);
++	idma_write(ctx, IDMA_QOS_LUT0, 0x44444444);
++	idma_write(ctx, IDMA_QOS_LUT1, 0x44444444);
++	idma_write(ctx, IDMA_DYNAMIC_GATING, IDMA_DYNAMIC_GATING_ALL);
++	dpp_write(ctx, DPP_DYNAMIC_GATING, DPP_DYNAMIC_GATING_ALL);
++	idma_write(ctx, IDMA_OUT_CON, IDMA_FRAME_ALPHA(0xff));
++	idma_write(ctx, IDMA_RECOVERY_CONTROL, IDMA_INITIAL_RECOVERY_NUM);
++}
++
++static int decon_hw_init(struct exynos8895_decon *ctx)
++{
++	u32 count = EXYNOS8895_DSC_WIDTH * EXYNOS8895_HEIGHT;
++	int ret;
++
++	/* Freeze a bootloader-owned command-mode scanout before shadow writes. */
++	if (decon_read(ctx, DECON_GLOBAL_CONTROL) & DECON_GLOBAL_RUN_STATUS)
++		dev_info(ctx->dev, "taking over running bootloader DECON\n");
++	decon_trigger(ctx, false);
++	decon_update_bits(ctx, DECON_INTERRUPT_ENABLE,
++			  DECON_INTERRUPT_ENABLE_MASK, 0);
++	decon_update_bits(ctx, DECON_EXTRA_INTERRUPT_ENABLE,
++			  DECON_EXTRA_INTERRUPT_MASK, 0);
++	decon_write(ctx, DECON_INTERRUPT_PENDING,
++		    DECON_INTERRUPT_PENDING_ALL);
++	decon_write(ctx, DECON_EXTRA_INTERRUPT_PENDING,
++		    DECON_EXTRA_INTERRUPT_MASK);
++
++	ret = decon_route_display(ctx);
++	if (ret)
++		return ret;
++
++	decon_update_bits(ctx, DECON_CLOCK_CONTROL, DECON_CLOCK_CONTROL_MASK,
++			  DECON_CLOCK_CONTROL_MASK);
++	decon_write(ctx, DECON_SRAM_SHARE_ENABLE, DECON_SRAM_FIFO_8K);
++	decon_update_bits(ctx, DECON_GLOBAL_CONTROL, DECON_GLOBAL_I80IF,
++			  DECON_GLOBAL_I80IF);
++	decon_write(ctx, DECON_BG_SIZE,
++		    HW_SIZE(EXYNOS8895_WIDTH, EXYNOS8895_HEIGHT));
++	decon_write(ctx, DECON_BG_PIXEL_COUNT,
++		    EXYNOS8895_WIDTH * EXYNOS8895_HEIGHT);
++
++	decon_dsc_program(ctx, DECON_DSC0);
++	decon_dsc_program(ctx, DECON_DSC1);
++	decon_write(ctx, DECON_DATA_PATH_CONTROL2,
++		    DECON_DATA_PATH_DUAL_DSC_DSIM0);
++	decon_write(ctx, DECON_SPLITTER_SIZE,
++		    HW_SIZE(EXYNOS8895_DSI_WIDTH, EXYNOS8895_HEIGHT));
++	decon_write(ctx, DECON_SPLITTER_PIXEL_COUNT, count);
++	decon_write(ctx, DECON_SPLITTER_INDEX, EXYNOS8895_DSC_WIDTH);
++	decon_write(ctx, DECON_SPLITTER_OVERLAP, 0);
++	decon_write(ctx, DECON_FIFO0_SIZE,
++		    HW_SIZE(EXYNOS8895_DSC_WIDTH, EXYNOS8895_HEIGHT));
++	decon_write(ctx, DECON_FIFO0_PIXEL_COUNT, count);
++	decon_write(ctx, DECON_FIFO1_SIZE,
++		    HW_SIZE(EXYNOS8895_DSC_WIDTH, EXYNOS8895_HEIGHT));
++	decon_write(ctx, DECON_FIFO1_PIXEL_COUNT, count);
++	decon_write(ctx, DECON_FIFO_THRESHOLD,
++		    (EXYNOS8895_DSC_WIDTH << 16) | EXYNOS8895_DSC_WIDTH);
++	decon_update_bits(ctx, DECON_FORMATTER_CONTROL,
++			  DECON_FORMATTER_RGB_ORDER_MASK, 0);
++	decon_write(ctx, DECON_FORMATTER0_SIZE,
++		    HW_SIZE(EXYNOS8895_DSI_WIDTH, EXYNOS8895_HEIGHT));
++	decon_write(ctx, DECON_FORMATTER0_PIXEL_COUNT,
++		    EXYNOS8895_DSI_WIDTH * EXYNOS8895_HEIGHT);
++
++	decon_update_bits(ctx, DECON_DATA_PATH_CONTROL1,
++			  DECON_WIN_CHMAP_MASK(0),
++			  DECON_WIN_CHMAP(0, DECON_IDMA_G1_CHANNEL));
++	decon_update_bits(ctx, DECON_DATA_PATH_CONTROL0,
++			  DECON_WIN_ENABLE(0), 0);
++	dpp_hw_init(ctx);
++
++	decon_write(ctx, DECON_INTERRUPT_PENDING,
++		    DECON_INTERRUPT_PENDING_ALL);
++	decon_write(ctx, DECON_EXTRA_INTERRUPT_PENDING,
++		    DECON_EXTRA_INTERRUPT_MASK);
++	if (!ctx->irq_enabled) {
++		enable_irq(ctx->irq);
++		ctx->irq_enabled = true;
++	}
++	decon_update_bits(ctx, DECON_INTERRUPT_ENABLE,
++			  DECON_FRAME_DONE_INT_EN | DECON_INT_EN,
++			  DECON_FRAME_DONE_INT_EN | DECON_INT_EN);
++	return 0;
++}
++
++static int decon_start(struct exynos8895_decon *ctx)
++{
++	u32 val;
++	int ret;
++
++	decon_update_bits(ctx, DECON_GLOBAL_CONTROL,
++			  DECON_GLOBAL_ENABLE | DECON_GLOBAL_ENABLE_F,
++			  DECON_GLOBAL_ENABLE | DECON_GLOBAL_ENABLE_F);
++	decon_shadow_update(ctx);
++	ret = readl_poll_timeout(ctx->regs + DECON_GLOBAL_CONTROL, val,
++				 val & DECON_GLOBAL_RUN_STATUS, 10, 20000);
++	if (ret)
++		return dev_err_probe(ctx->dev, ret,
++				     "DECON did not enter run state\n");
++
++	decon_trigger(ctx, true);
++	return 0;
++}
++
++static void decon_stop(struct exynos8895_decon *ctx)
++{
++	u32 val;
++
++	decon_trigger(ctx, false);
++	decon_update_bits(ctx, DECON_INTERRUPT_ENABLE,
++			  DECON_INTERRUPT_ENABLE_MASK, 0);
++	decon_update_bits(ctx, DECON_EXTRA_INTERRUPT_ENABLE,
++			  DECON_EXTRA_INTERRUPT_MASK, 0);
++	decon_write(ctx, DECON_INTERRUPT_PENDING,
++		    DECON_INTERRUPT_PENDING_ALL);
++	decon_write(ctx, DECON_EXTRA_INTERRUPT_PENDING,
++		    DECON_EXTRA_INTERRUPT_MASK);
++	if (ctx->irq_enabled) {
++		disable_irq(ctx->irq);
++		ctx->irq_enabled = false;
++	}
++	decon_update_bits(ctx, DECON_DATA_PATH_CONTROL0,
++			  DECON_WIN_ENABLE(0), 0);
++	decon_update_bits(ctx, DECON_GLOBAL_CONTROL,
++			  DECON_GLOBAL_ENABLE_F, 0);
++	decon_shadow_update(ctx);
++	if (readl_poll_timeout(ctx->regs + DECON_GLOBAL_CONTROL, val,
++			       !(val & DECON_GLOBAL_RUN_STATUS), 10, 20000))
++		dev_warn(ctx->dev, "DECON did not leave run state\n");
++}
++
++/* Diagnostic only: no reset or routing write is exposed through sysfs. */
++static ssize_t decon_selftest_store(struct device *dev,
++				   struct device_attribute *attr,
++				   const char *buf, size_t count)
++{
++	struct exynos8895_decon *ctx = dev_get_drvdata(dev);
++	u32 dlmux, lpmux, te;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++
++	if (sysfs_streq(buf, "power")) {
++		dev_info(dev, "DECON self-test: clocks and power domain are on\n");
++	} else if (sysfs_streq(buf, "status")) {
++		regmap_read(ctx->sysreg, SYSREG_DISP_LPMUX_CFG, &lpmux);
++		regmap_read(ctx->sysreg, SYSREG_DISP_DLMUX_CFG, &dlmux);
++		regmap_read(ctx->sysreg, SYSREG_DISP_TE_SEL, &te);
++		dev_info(dev,
++			 "DECON status: global=%08x int=%08x/%08x trig=%08x path=%08x win=%08x\n",
++			 decon_read(ctx, DECON_GLOBAL_CONTROL),
++			 decon_read(ctx, DECON_INTERRUPT_ENABLE),
++			 decon_read(ctx, DECON_INTERRUPT_PENDING),
++			 decon_read(ctx, DECON_TRIGGER_CONTROL),
++			 decon_read(ctx, DECON_DATA_PATH_CONTROL2),
++			 decon_read(ctx, DECON_DATA_PATH_CONTROL0));
++		dev_info(dev,
++			 "DPU route: lpmux=%08x dlmux=%08x te=%08x; IDMA=%08x DPP=%08x\n",
++			 lpmux, dlmux, te, idma_read(ctx, IDMA_ENABLE),
++			 dpp_read(ctx, DPP_ENABLE));
++		dev_info(dev,
++			 "scanout: shadow=%08x addr=%08x src=%08x img=%08x dpp-in=%08x dpp-img=%08x dsc=%08x/%08x\n",
++			 decon_read(ctx, DECON_SHADOW_UPDATE),
++			 idma_read(ctx, IDMA_BASE_ADDR_Y),
++			 idma_read(ctx, IDMA_SRC_SIZE),
++			 idma_read(ctx, IDMA_IMG_SIZE),
++			 dpp_read(ctx, DPP_IN_CON),
++			 dpp_read(ctx, DPP_IMG_SIZE),
++			 decon_read(ctx, DECON_DSC0 + DSC_CONTROL0),
++			 decon_read(ctx, DECON_DSC1 + DSC_CONTROL0));
++		dev_info(dev, "DMA IRQ: idma=%08x dpp=%08x\n",
++			 idma_read(ctx, IDMA_IRQ), dpp_read(ctx, DPP_IRQ));
++	} else {
++		ret = -EINVAL;
++	}
++
++	pm_runtime_put_sync(dev);
++	return ret < 0 ? ret : count;
++}
++static DEVICE_ATTR_WO(decon_selftest);
++
++static void decon_update_plane(struct exynos_drm_crtc *crtc,
++			       struct exynos_drm_plane *plane)
++{
++	struct exynos8895_decon *ctx = crtc->ctx;
++	struct exynos_drm_plane_state *state =
++		to_exynos_plane_state(plane->base.state);
++	struct drm_framebuffer *fb = state->base.fb;
++	u32 alpha, cpp, full_width, win;
++	dma_addr_t addr;
++
++	if (!ctx->active || !fb)
++		return;
++
++	cpp = fb->format->cpp[0];
++	full_width = fb->pitches[0] / cpp;
++	addr = exynos_drm_fb_dma_addr(fb, 0);
++
++	idma_write(ctx, IDMA_IN_CON,
++		   IDMA_IN_IC_MAX | idma_format(fb->format->format));
++	idma_write(ctx, IDMA_OUT_CON, IDMA_FRAME_ALPHA(0xff));
++	idma_write(ctx, IDMA_SRC_OFFSET,
++		   HW_POSITION(state->src.x, state->src.y));
++	idma_write(ctx, IDMA_SRC_SIZE, HW_SIZE(full_width, fb->height));
++	idma_write(ctx, IDMA_IMG_SIZE,
++		   HW_SIZE(state->src.w, state->src.h));
++	idma_write(ctx, IDMA_BASE_ADDR_Y, lower_32_bits(addr));
++	alpha = format_has_alpha(fb->format->format) ? DPP_ALPHA_PER_PIXEL : 0;
++	dpp_write(ctx, DPP_IN_CON, alpha);
++	dpp_write(ctx, DPP_IMG_SIZE,
++		  HW_SIZE(state->src.w, state->src.h));
++
++	win = DECON_WIN_ALPHA0(0xff) | DECON_WIN_ALPHA1(0xff) |
++	      DECON_WIN_FUNC_COPY;
++	decon_write(ctx, DECON_WIN_CONTROL0(0), win);
++	decon_write(ctx, DECON_WIN_CONTROL1(0), 0);
++	decon_write(ctx, DECON_WIN_START(0),
++		    HW_POSITION(state->crtc.x, state->crtc.y));
++	decon_write(ctx, DECON_WIN_END(0),
++		    HW_POSITION(state->crtc.x + state->crtc.w - 1,
++				state->crtc.y + state->crtc.h - 1));
++	decon_write(ctx, DECON_WIN_START_TIME(0), 0);
++	decon_write(ctx, DECON_WIN_PIXEL_COUNT(0),
++		    state->crtc.w * state->crtc.h);
++	decon_update_bits(ctx, DECON_DATA_PATH_CONTROL1,
++			  DECON_WIN_CHMAP_MASK(0),
++			  DECON_WIN_CHMAP(0, DECON_IDMA_G1_CHANNEL));
++	decon_update_bits(ctx, DECON_DATA_PATH_CONTROL0,
++			  DECON_WIN_ENABLE(0), DECON_WIN_ENABLE(0));
++
++	decon_shadow_update(ctx);
++}
++
++static void decon_disable_plane(struct exynos_drm_crtc *crtc,
++				struct exynos_drm_plane *plane)
++{
++	struct exynos8895_decon *ctx = crtc->ctx;
++
++	if (!ctx->active)
++		return;
++
++	decon_update_bits(ctx, DECON_DATA_PATH_CONTROL0,
++			  DECON_WIN_ENABLE(0), 0);
++	decon_shadow_update(ctx);
++}
++
++static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
++{
++	struct exynos8895_decon *ctx = crtc->ctx;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(ctx->dev);
++	if (ret < 0) {
++		dev_err(ctx->dev, "failed to power DECON: %d\n", ret);
++		return;
++	}
++
++	ctx->active = true;
++	ret = decon_hw_init(ctx);
++	if (ret)
++		goto err_put;
++	decon_update_plane(crtc, &ctx->plane);
++	ret = decon_start(ctx);
++	if (!ret)
++		return;
++
++	decon_stop(ctx);
++err_put:
++	ctx->active = false;
++	pm_runtime_put_sync(ctx->dev);
++}
++
++static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
++{
++	struct exynos8895_decon *ctx = crtc->ctx;
++
++	if (!ctx->active)
++		return;
++
++	decon_stop(ctx);
++	ctx->active = false;
++	pm_runtime_put_sync(ctx->dev);
++}
++
++static int decon_enable_vblank(struct exynos_drm_crtc *crtc)
++{
++	return 0;
++}
++
++static void decon_disable_vblank(struct exynos_drm_crtc *crtc)
++{
++}
++
++static void decon_atomic_begin(struct exynos_drm_crtc *crtc)
++{
++	struct exynos8895_decon *ctx = crtc->ctx;
++
++	if (ctx->active)
++		decon_trigger(ctx, false);
++}
++
++static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
++{
++	struct exynos8895_decon *ctx = crtc->ctx;
++
++	if (!ctx->active)
++		return;
++
++	decon_shadow_update(ctx);
++	decon_trigger(ctx, true);
++	exynos_crtc_handle_event(crtc);
++}
++
++static void decon_te_handler(struct exynos_drm_crtc *crtc)
++{
++	struct exynos8895_decon *ctx = crtc->ctx;
++
++	if (!ctx->active)
++		return;
++
++	drm_crtc_handle_vblank(&crtc->base);
++}
++
++static const struct exynos_drm_crtc_ops decon_crtc_ops = {
++	.atomic_enable = decon_atomic_enable,
++	.atomic_disable = decon_atomic_disable,
++	.enable_vblank = decon_enable_vblank,
++	.disable_vblank = decon_disable_vblank,
++	.atomic_begin = decon_atomic_begin,
++	.update_plane = decon_update_plane,
++	.disable_plane = decon_disable_plane,
++	.atomic_flush = decon_atomic_flush,
++	.te_handler = decon_te_handler,
++};
++
++static irqreturn_t decon_irq_handler(int irq, void *data)
++{
++	struct exynos8895_decon *ctx = data;
++	u32 pending = decon_read(ctx, DECON_INTERRUPT_PENDING) &
++		      DECON_INTERRUPT_PENDING_ALL;
++
++	if (!pending)
++		return IRQ_NONE;
++
++	decon_write(ctx, DECON_INTERRUPT_PENDING, pending);
++	return IRQ_HANDLED;
++}
++
++static int decon_bind(struct device *dev, struct device *master, void *data)
++{
++	struct exynos8895_decon *ctx = dev_get_drvdata(dev);
++	struct drm_device *drm = data;
++	int ret;
++
++	ctx->drm_dev = drm;
++	ret = exynos_drm_register_dma(drm, dev, &ctx->dma_priv);
++	if (ret)
++		return ret;
++
++	ctx->plane_config.pixel_formats = exynos8895_formats;
++	ctx->plane_config.num_pixel_formats = ARRAY_SIZE(exynos8895_formats);
++	ctx->plane_config.zpos = 0;
++	ctx->plane_config.type = DRM_PLANE_TYPE_PRIMARY;
++
++	ret = exynos_plane_init(drm, &ctx->plane, 0, &ctx->plane_config);
++	if (ret)
++		goto err_dma;
++
++	ctx->crtc = exynos_drm_crtc_create(drm, &ctx->plane.base,
++			EXYNOS_DISPLAY_TYPE_LCD, &decon_crtc_ops, ctx);
++	if (IS_ERR(ctx->crtc)) {
++		ret = PTR_ERR(ctx->crtc);
++		ctx->crtc = NULL;
++		goto err_dma;
++	}
++
++	return 0;
++
++err_dma:
++	exynos_drm_unregister_dma(drm, dev, &ctx->dma_priv);
++	return ret;
++}
++
++static void decon_unbind(struct device *dev, struct device *master, void *data)
++{
++	struct exynos8895_decon *ctx = dev_get_drvdata(dev);
++
++	if (ctx->active)
++		decon_atomic_disable(ctx->crtc);
++	exynos_drm_unregister_dma(ctx->drm_dev, dev, &ctx->dma_priv);
++}
++
++static const struct component_ops decon_component_ops = {
++	.bind = decon_bind,
++	.unbind = decon_unbind,
++};
++
++static int exynos8895_decon_runtime_resume(struct device *dev)
++{
++	struct exynos8895_decon *ctx = dev_get_drvdata(dev);
++
++	return clk_bulk_prepare_enable(DECON_NUM_CLKS, ctx->clks);
++}
++
++static int exynos8895_decon_runtime_suspend(struct device *dev)
++{
++	struct exynos8895_decon *ctx = dev_get_drvdata(dev);
++
++	clk_bulk_disable_unprepare(DECON_NUM_CLKS, ctx->clks);
++	return 0;
++}
++
++static DEFINE_RUNTIME_DEV_PM_OPS(exynos8895_decon_pm_ops,
++				 exynos8895_decon_runtime_suspend,
++				 exynos8895_decon_runtime_resume, NULL);
++
++static int exynos8895_decon_probe(struct platform_device *pdev)
++{
++	static const char * const clock_names[DECON_NUM_CLKS] = {
++		[DECON_ACLK] = "decon-aclk",
++		[DECON_PCLKM] = "decon-pclkm",
++		[DECON_PCLKS] = "decon-pclks",
++		[DPP_ACLK] = "dpp-aclk",
++		[DPP_PCLKM] = "dpp-pclkm",
++		[DPP_PCLKS] = "dpp-pclks",
++	};
++	struct device *dev = &pdev->dev;
++	struct exynos8895_decon *ctx;
++	struct resource *res;
++	int i, irq, ret;
++
++	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++	ctx->dev = dev;
++	platform_set_drvdata(pdev, ctx);
++
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (ret)
++		return dev_err_probe(dev, ret, "32-bit DMA is unavailable\n");
++
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "decon");
++	ctx->regs = devm_ioremap_resource(dev, res);
++	if (IS_ERR(ctx->regs))
++		return PTR_ERR(ctx->regs);
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "dpp");
++	ctx->dpp = devm_ioremap_resource(dev, res);
++	if (IS_ERR(ctx->dpp))
++		return PTR_ERR(ctx->dpp);
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "idma");
++	ctx->idma = devm_ioremap_resource(dev, res);
++	if (IS_ERR(ctx->idma))
++		return PTR_ERR(ctx->idma);
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "dma-common");
++	ctx->dma_common = devm_ioremap_resource(dev, res);
++	if (IS_ERR(ctx->dma_common))
++		return PTR_ERR(ctx->dma_common);
++
++	for (i = 0; i < DECON_NUM_CLKS; i++)
++		ctx->clks[i].id = clock_names[i];
++	ret = devm_clk_bulk_get(dev, DECON_NUM_CLKS, ctx->clks);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get DECON clocks\n");
++
++	ctx->sysreg = syscon_regmap_lookup_by_phandle(dev->of_node,
++						       "samsung,sysreg");
++	if (IS_ERR(ctx->sysreg))
++		return dev_err_probe(dev, PTR_ERR(ctx->sysreg),
++				     "failed to get DPU sysreg\n");
++
++	irq = platform_get_irq_byname(pdev, "frame-done");
++	if (irq < 0)
++		return irq;
++	ctx->irq = irq;
++	ret = devm_request_irq(dev, irq, decon_irq_handler, IRQF_NO_AUTOEN,
++			       dev_name(dev), ctx);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to request frame IRQ\n");
++
++	pm_runtime_enable(dev);
++	ret = device_create_file(dev, &dev_attr_decon_selftest);
++	if (ret) {
++		pm_runtime_disable(dev);
++		return ret;
++	}
++	ret = component_add(dev, &decon_component_ops);
++	if (ret) {
++		device_remove_file(dev, &dev_attr_decon_selftest);
++		pm_runtime_disable(dev);
++	}
++
++	return ret;
++}
++
++static void exynos8895_decon_remove(struct platform_device *pdev)
++{
++	device_remove_file(&pdev->dev, &dev_attr_decon_selftest);
++	component_del(&pdev->dev, &decon_component_ops);
++	pm_runtime_disable(&pdev->dev);
++}
++
++static const struct of_device_id exynos8895_decon_of_match[] = {
++	{ .compatible = "samsung,exynos8895-decon" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, exynos8895_decon_of_match);
++
++struct platform_driver exynos8895_decon_driver = {
++	.probe = exynos8895_decon_probe,
++	.remove = exynos8895_decon_remove,
++	.driver = {
++		.name = "exynos8895-decon",
++		.of_match_table = exynos8895_decon_of_match,
++		.pm = pm_ptr(&exynos8895_decon_pm_ops),
++	},
++};
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3ha6.c b/drivers/gpu/drm/panel/panel-samsung-s6e3ha6.c
+new file mode 100644
+index 000000000..c2fab2ab1
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3ha6.c
+@@ -0,0 +1,289 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung S6E3HA6 command-mode AMOLED panel used by Galaxy S8 (dreamlte).
++ *
++ * The basic power-on sequence and the DSC PPS were taken from Samsung's
++ * Exynos8895 panel driver.  PMIC-controlled panel rails are already enabled
++ * by the boot firmware and cannot be controlled until the S2MPS17 driver is
++ * available, so this driver deliberately owns only the reset GPIO.
++ */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++
++#include <video/mipi_display.h>
++
++#include <drm/display/drm_dsc.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++
++struct s6e3ha6 {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct gpio_desc *reset_gpio;
++	struct drm_dsc_config dsc;
++};
++
++static const struct drm_display_mode s6e3ha6_mode = {
++	.clock = (1440 + 2 + 2 + 2) * (2960 + 15 + 3 + 1) * 60 / 1000,
++	.hdisplay = 1440,
++	.hsync_start = 1442,
++	.hsync_end = 1444,
++	.htotal = 1446,
++	.vdisplay = 2960,
++	.vsync_start = 2975,
++	.vsync_end = 2978,
++	.vtotal = 2979,
++	.width_mm = 65,
++	.height_mm = 133,
++	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
++};
++
++/* 1440x2960, two 720x40 DSC slices: vendor PPS bytes 0 through 127. */
++static const u8 s6e3ha6_pps[128] = {
++	0x11, 0x00, 0x00, 0x89, 0x30, 0x80, 0x0b, 0x90,
++	0x05, 0xa0, 0x00, 0x28, 0x02, 0xd0, 0x02, 0xd0,
++	0x02, 0x00, 0x02, 0x68, 0x00, 0x20, 0x04, 0x6c,
++	0x00, 0x0a, 0x00, 0x0c, 0x02, 0x77, 0x01, 0xe9,
++	0x18, 0x00, 0x10, 0xf0, 0x03, 0x0c, 0x20, 0x00,
++	0x06, 0x0b, 0x0b, 0x33, 0x0e, 0x1c, 0x2a, 0x38,
++	0x46, 0x54, 0x62, 0x69, 0x70, 0x77, 0x79, 0x7b,
++	0x7d, 0x7e, 0x01, 0x02, 0x01, 0x00, 0x09, 0x40,
++	0x09, 0xbe, 0x19, 0xfc, 0x19, 0xfa, 0x19, 0xf8,
++	0x1a, 0x38, 0x1a, 0x78, 0x1a, 0xb6, 0x2a, 0xf6,
++	0x2b, 0x34, 0x2b, 0x74, 0x3b, 0x74, 0x6b, 0xf4,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++};
++
++static inline struct s6e3ha6 *panel_to_s6e3ha6(struct drm_panel *panel)
++{
++	return container_of(panel, struct s6e3ha6, panel);
++}
++
++static void s6e3ha6_reset(struct s6e3ha6 *ctx)
++{
++	/* reset-gpios is active-low; this is the vendor 9ms/1ms/9ms pulse. */
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(9000, 10000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(9000, 10000);
++}
++
++static int s6e3ha6_prepare(struct drm_panel *panel)
++{
++	struct s6e3ha6 *ctx = panel_to_s6e3ha6(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++	struct drm_dsc_picture_parameter_set pps;
++
++	BUILD_BUG_ON(sizeof(pps) != sizeof(s6e3ha6_pps));
++	s6e3ha6_reset(ctx);
++	usleep_range(5000, 6000);
++
++	/* Enable the vendor command level, configure DSC, then wake the panel. */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9f, 0xa5, 0xa5);
++	memcpy(&pps, s6e3ha6_pps, sizeof(pps));
++	mipi_dsi_compression_mode_multi(&dsi_ctx, true);
++	mipi_dsi_picture_parameter_set_multi(&dsi_ctx, &pps);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9f, 0x5a, 0x5a);
++	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 10);
++
++	/* Native 1440x2960 scaler and address window. */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xba, 0x01, 0x02, 0x06, 0x08,
++				     0x08, 0x1e, 0x03);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0xa5, 0xa5);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x2a, 0x00, 0x00, 0x05, 0x9f);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x2b, 0x00, 0x00, 0x0b, 0x8f);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfc, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x05);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x01);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x07);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf2, 0x3c, 0xd0);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfc, 0xa5, 0xa5);
++
++	/* Full panel area, TE and the calibrated 898 MHz FFC parameters. */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9f, 0xa5, 0xa5);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x1a, 0x1f, 0x00, 0x00, 0x00, 0x00);
++	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9f, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xed, 0x4c);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xc5, 0x0d, 0x08, 0x40, 0x19,
++				     0xb7, 0x07, 0x1f, 0x81, 0x25, 0xce, 0x79,
++				     0x77, 0x73, 0x00, 0xff, 0x78, 0x8f, 0x00,
++				     0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb9, 0x01, 0x0b, 0x91, 0x00,
++					     0x09);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x03);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf6, 0x53);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x08);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf6, 0x80);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0xa5, 0xa5);
++
++	/* Vendor baseline brightness sequence; calibrated tuning can follow. */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xca,
++				     0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
++				     0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
++				     0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
++				     0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
++				     0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
++				     0x80, 0x80, 0x80, 0x00, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb1, 0x00, 0x0c);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb5,
++				     0x19, 0xdc, 0x0a, 0x01, 0x01, 0x34,
++				     0x67, 0x9a, 0xcd, 0x01, 0x22, 0x33,
++				     0x44, 0x00, 0x00, 0x08, 0x88, 0xff,
++				     0x0f, 0x01, 0x11, 0x11, 0x10, 0x0c);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf4, 0xeb, 0x17);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb4, 0x00, 0x44, 0x99,
++				     0x00, 0x00, 0x0a, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x55, 0x00);
++	/* DREAM2_A3_SA IRC table; the DA table belongs to another panel variant. */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb8,
++				     0x0d, 0xf0, 0x2d, 0x30, 0x3c, 0xbe,
++				     0x33, 0x69, 0x12, 0x7a, 0xe0, 0x78,
++				     0x78, 0x78, 0x28, 0x28, 0x28, 0x28,
++				     0x28, 0x28);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf7, 0x03);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0xa5, 0xa5);
++
++	if (dsi_ctx.accum_err)
++		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++
++	return dsi_ctx.accum_err;
++}
++
++static int s6e3ha6_enable(struct drm_panel *panel)
++{
++	struct s6e3ha6 *ctx = panel_to_s6e3ha6(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9f, 0xa5, 0xa5);
++	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9f, 0x5a, 0x5a);
++
++	return dsi_ctx.accum_err;
++}
++
++static int s6e3ha6_disable(struct drm_panel *panel)
++{
++	struct s6e3ha6 *ctx = panel_to_s6e3ha6(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9f, 0xa5, 0xa5);
++	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9f, 0x5a, 0x5a);
++
++	return dsi_ctx.accum_err;
++}
++
++static int s6e3ha6_unprepare(struct drm_panel *panel)
++{
++	struct s6e3ha6 *ctx = panel_to_s6e3ha6(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9f, 0xa5, 0xa5);
++	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9f, 0x5a, 0x5a);
++	mipi_dsi_msleep(&dsi_ctx, 120);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++
++	return dsi_ctx.accum_err;
++}
++
++static int s6e3ha6_get_modes(struct drm_panel *panel,
++				     struct drm_connector *connector)
++{
++	return drm_connector_helper_get_modes_fixed(connector, &s6e3ha6_mode);
++}
++
++static const struct drm_panel_funcs s6e3ha6_panel_funcs = {
++	.prepare = s6e3ha6_prepare,
++	.unprepare = s6e3ha6_unprepare,
++	.enable = s6e3ha6_enable,
++	.disable = s6e3ha6_disable,
++	.get_modes = s6e3ha6_get_modes,
++};
++
++static int s6e3ha6_probe(struct mipi_dsi_device *dsi)
++{
++	struct s6e3ha6 *ctx;
++	int ret;
++
++	ctx = devm_drm_panel_alloc(&dsi->dev, __typeof(*ctx), panel,
++				   &s6e3ha6_panel_funcs, DRM_MODE_CONNECTOR_DSI);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++
++	ctx->reset_gpio = devm_gpiod_get(&dsi->dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->reset_gpio))
++		return dev_err_probe(&dsi->dev, PTR_ERR(ctx->reset_gpio),
++				     "failed to get reset GPIO\n");
++
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_MODE_LPM |
++			  MIPI_DSI_CLOCK_NON_CONTINUOUS;
++	ctx->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	ctx->dsc.dsc_version_major = 1;
++	ctx->dsc.dsc_version_minor = 1;
++	ctx->dsc.slice_height = 40;
++	ctx->dsc.slice_width = 720;
++	ctx->dsc.slice_count = 2;
++	ctx->dsc.bits_per_component = 8;
++	ctx->dsc.bits_per_pixel = 8 << 4;
++	ctx->dsc.block_pred_enable = true;
++	dsi->dsc = &ctx->dsc;
++
++	ctx->panel.prepare_prev_first = true;
++	drm_panel_add(&ctx->panel);
++	ret = mipi_dsi_attach(dsi);
++	if (ret) {
++		drm_panel_remove(&ctx->panel);
++		return ret;
++	}
++
++	return 0;
++}
++
++static void s6e3ha6_remove(struct mipi_dsi_device *dsi)
++{
++	struct s6e3ha6 *ctx = mipi_dsi_get_drvdata(dsi);
++	int ret;
++
++	ret = mipi_dsi_detach(dsi);
++	if (ret < 0)
++		dev_err(&dsi->dev, "failed to detach from DSI host: %d\n", ret);
++	drm_panel_remove(&ctx->panel);
++}
++
++static const struct of_device_id s6e3ha6_of_match[] = {
++	{ .compatible = "samsung,s6e3ha6" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, s6e3ha6_of_match);
++
++static struct mipi_dsi_driver s6e3ha6_driver = {
++	.driver = {
++		.name = "panel-samsung-s6e3ha6",
++		.of_match_table = s6e3ha6_of_match,
++	},
++	.probe = s6e3ha6_probe,
++	.remove = s6e3ha6_remove,
++};
++module_mipi_dsi_driver(s6e3ha6_driver);
++
++MODULE_DESCRIPTION("Samsung S6E3HA6 AMOLED panel");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/power/supply/max77865_battery.c b/drivers/power/supply/max77865_battery.c
+new file mode 100644
+index 000000000..ca2e7a196
+--- /dev/null
++++ b/drivers/power/supply/max77865_battery.c
+@@ -0,0 +1,439 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Read-only power-supply monitor for the MAX77854/MAX77865 used by
++ * Exynos8895 phones.
++ *
++ * The vendor PMIC exposes the charger and fuel gauge through secondary I2C
++ * addresses.  This driver deliberately reports state only: charging policy
++ * and register programming remain owned by the firmware/userspace path until
++ * a complete charger driver is ready.
++ */
++
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/power_supply.h>
++#include <linux/property.h>
++#include <linux/workqueue.h>
++
++#define MAX77865_I2C_CHARGER	0x69 /* vendor 0xd2 >> 1 */
++#define MAX77865_I2C_FUELGAUGE	0x36 /* vendor 0x6c >> 1 */
++
++#define MAX77865_REG_PMIC_ID		0x00
++
++#define MAX77865_REG_FG_STATUS		0x00
++#define MAX77865_REG_FG_REPSOC		0x06
++#define MAX77865_REG_FG_TEMPERATURE	0x08
++#define MAX77865_REG_FG_VCELL		0x09
++#define MAX77865_REG_FG_CURRENT		0x0a
++#define MAX77865_REG_FG_AVG_CURRENT	0x0b
++#define MAX77865_REG_FG_CYCLES		0x17
++#define MAX77865_REG_FG_REMCAP_REP	0x05
++
++#define MAX77865_REG_CHG_DETAILS_00	0xb3
++#define MAX77865_REG_CHG_DETAILS_01	0xb4
++#define MAX77865_REG_CHG_INT_OK		0xb2
++
++#define MAX77865_CHGIN_DTLS		0x60
++#define MAX77865_CHGIN_DTLS_SHIFT	5
++#define MAX77865_CHG_DTLS		0x0f
++
++#define MAX77865_POLL_MS		2000
++
++struct max77865_power {
++	struct device *dev;
++	struct i2c_client *pmic;
++	struct i2c_client *charger;
++	struct i2c_client *fuelgauge;
++	struct power_supply *battery;
++	struct power_supply *usb;
++	struct delayed_work poll_work;
++	struct mutex lock;
++};
++
++static int max77865_read8(struct i2c_client *client, u8 reg, u8 *value)
++{
++	int ret = i2c_smbus_read_byte_data(client, reg);
++
++	if (ret < 0)
++		return ret;
++
++	*value = ret;
++	return 0;
++}
++
++static int max77865_read16(struct i2c_client *client, u8 reg, u16 *value)
++{
++	int ret = i2c_smbus_read_word_data(client, reg);
++
++	if (ret < 0)
++		return ret;
++
++	*value = ret;
++	return 0;
++}
++
++static int max77865_read_vbus_state(struct max77865_power *data)
++{
++	u8 details;
++	int ret;
++
++	ret = max77865_read8(data->charger, MAX77865_REG_CHG_DETAILS_00,
++			     &details);
++	if (ret)
++		return ret;
++
++	return (details & MAX77865_CHGIN_DTLS) >> MAX77865_CHGIN_DTLS_SHIFT;
++}
++
++static int max77865_read_charger_status(struct max77865_power *data)
++{
++	u8 details;
++	int ret;
++
++	ret = max77865_read8(data->charger, MAX77865_REG_CHG_DETAILS_01,
++			     &details);
++	if (ret)
++		return ret;
++
++	switch (details & MAX77865_CHG_DTLS) {
++	case 0x00:
++	case 0x01:
++	case 0x02:
++		return POWER_SUPPLY_STATUS_CHARGING;
++	case 0x03:
++	case 0x04:
++		return POWER_SUPPLY_STATUS_FULL;
++	case 0x05:
++	case 0x06:
++	case 0x07:
++		return POWER_SUPPLY_STATUS_NOT_CHARGING;
++	case 0x08:
++	case 0x0a:
++	case 0x0b:
++		return POWER_SUPPLY_STATUS_DISCHARGING;
++	default:
++		return POWER_SUPPLY_STATUS_UNKNOWN;
++	}
++}
++
++static int max77865_read_capacity(struct max77865_power *data)
++{
++	u16 raw;
++	int ret;
++
++	ret = max77865_read16(data->fuelgauge, MAX77865_REG_FG_REPSOC, &raw);
++	if (ret)
++		return ret;
++
++	/* RepSOC is a 16-bit percentage: high byte is 1%, low byte fractional. */
++	return min_t(int, 100, DIV_ROUND_CLOSEST((int)raw, 256));
++}
++
++static int max77865_read_voltage_uv(struct max77865_power *data)
++{
++	u16 raw;
++	int ret;
++
++	ret = max77865_read16(data->fuelgauge, MAX77865_REG_FG_VCELL, &raw);
++	if (ret)
++		return ret;
++
++	/* MAX172xx-style VCELL LSB is 78.125 uV. */
++	return (raw * 78125) / 1000;
++}
++
++static int max77865_read_current_ua(struct max77865_power *data, u8 reg)
++{
++	u16 raw;
++	int ret;
++
++	ret = max77865_read16(data->fuelgauge, reg, &raw);
++	if (ret)
++		return ret;
++
++	/* Vendor calibration uses a 10 mOhm sense resistor. */
++	return (s16)raw * 15625 / 100;
++}
++
++static int max77865_read_temperature(struct max77865_power *data)
++{
++	u16 raw;
++	int ret;
++	int temperature;
++	u8 high, low;
++
++	ret = max77865_read16(data->fuelgauge, MAX77865_REG_FG_TEMPERATURE,
++			     &raw);
++	if (ret)
++		return ret;
++
++	low = raw & 0xff;
++	high = raw >> 8;
++	if (high & BIT(7)) {
++		temperature = -(((~high & 0xff) + 1) * 1000);
++		temperature -= ((~low + 1) & 0xff) * 39 / 10;
++	} else {
++		temperature = (high & 0x7f) * 1000;
++		temperature += low * 39 / 10;
++	}
++
++	/* power_supply temperature is in tenths of a degree Celsius. */
++	return temperature / 100;
++}
++
++static int max77865_battery_get_property(struct power_supply *psy,
++					 enum power_supply_property property,
++					 union power_supply_propval *value)
++{
++	struct max77865_power *data = power_supply_get_drvdata(psy);
++	int vbus, ret;
++	u8 fg_status;
++	u16 raw;
++
++	mutex_lock(&data->lock);
++
++	switch (property) {
++	case POWER_SUPPLY_PROP_STATUS:
++		ret = max77865_read_charger_status(data);
++		if (ret < 0)
++			goto out;
++		value->intval = ret;
++		ret = 0;
++		break;
++	case POWER_SUPPLY_PROP_HEALTH:
++		vbus = max77865_read_vbus_state(data);
++		if (vbus < 0) {
++			ret = vbus;
++			goto out;
++		}
++		value->intval = vbus == 0x02 ? POWER_SUPPLY_HEALTH_OVERVOLTAGE :
++					POWER_SUPPLY_HEALTH_GOOD;
++		ret = 0;
++		break;
++	case POWER_SUPPLY_PROP_PRESENT:
++		ret = max77865_read8(data->fuelgauge, MAX77865_REG_FG_STATUS,
++				     &fg_status);
++		if (ret)
++			goto out;
++		value->intval = !(fg_status & BIT(3));
++		break;
++	case POWER_SUPPLY_PROP_ONLINE:
++		ret = max77865_read_vbus_state(data);
++		if (ret < 0)
++			goto out;
++		value->intval = ret == 0x03;
++		ret = 0;
++		break;
++	case POWER_SUPPLY_PROP_TECHNOLOGY:
++		value->intval = POWER_SUPPLY_TECHNOLOGY_LION;
++		ret = 0;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		ret = max77865_read_voltage_uv(data);
++		if (ret < 0)
++			goto out;
++		value->intval = ret;
++		ret = 0;
++		break;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		ret = max77865_read_current_ua(data, MAX77865_REG_FG_CURRENT);
++		if (ret < 0)
++			goto out;
++		value->intval = ret;
++		ret = 0;
++		break;
++	case POWER_SUPPLY_PROP_CURRENT_AVG:
++		ret = max77865_read_current_ua(data, MAX77865_REG_FG_AVG_CURRENT);
++		if (ret < 0)
++			goto out;
++		value->intval = ret;
++		ret = 0;
++		break;
++	case POWER_SUPPLY_PROP_CAPACITY:
++		ret = max77865_read_capacity(data);
++		if (ret < 0)
++			goto out;
++		value->intval = ret;
++		ret = 0;
++		break;
++	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
++		ret = max77865_read_capacity(data);
++		if (ret < 0)
++			goto out;
++		value->intval = ret >= 95 ? POWER_SUPPLY_CAPACITY_LEVEL_FULL :
++				ret >= 80 ? POWER_SUPPLY_CAPACITY_LEVEL_HIGH :
++				ret <= 5 ? POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL :
++				ret <= 15 ? POWER_SUPPLY_CAPACITY_LEVEL_LOW :
++				POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
++		ret = 0;
++		break;
++	case POWER_SUPPLY_PROP_TEMP:
++		ret = max77865_read_temperature(data);
++		if (ret < 0)
++			goto out;
++		value->intval = ret;
++		ret = 0;
++		break;
++	case POWER_SUPPLY_PROP_CYCLE_COUNT:
++		ret = max77865_read16(data->fuelgauge, MAX77865_REG_FG_CYCLES,
++				      &raw);
++		if (ret)
++			goto out;
++		value->intval = raw;
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++
++out:
++	mutex_unlock(&data->lock);
++	return ret;
++}
++
++static enum power_supply_property max77865_battery_properties[] = {
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_TECHNOLOGY,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_CURRENT_AVG,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
++	POWER_SUPPLY_PROP_TEMP,
++	POWER_SUPPLY_PROP_CYCLE_COUNT,
++};
++
++static enum power_supply_property max77865_usb_properties[] = {
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_ONLINE,
++};
++
++static const struct power_supply_desc max77865_battery_desc = {
++	.name = "battery",
++	.type = POWER_SUPPLY_TYPE_BATTERY,
++	.properties = max77865_battery_properties,
++	.num_properties = ARRAY_SIZE(max77865_battery_properties),
++	.get_property = max77865_battery_get_property,
++};
++
++static const struct power_supply_desc max77865_usb_desc = {
++	.name = "usb",
++	.type = POWER_SUPPLY_TYPE_USB,
++	.properties = max77865_usb_properties,
++	.num_properties = ARRAY_SIZE(max77865_usb_properties),
++	.get_property = max77865_battery_get_property,
++};
++
++static void max77865_power_poll(struct work_struct *work)
++{
++	struct max77865_power *data = container_of(work,
++						   struct max77865_power,
++						   poll_work.work);
++
++	power_supply_changed(data->battery);
++	power_supply_changed(data->usb);
++	schedule_delayed_work(&data->poll_work,
++			      msecs_to_jiffies(MAX77865_POLL_MS));
++}
++
++static int max77865_power_probe(struct i2c_client *client)
++{
++	struct power_supply_config psy_cfg = {};
++	struct max77865_power *data;
++	int id;
++
++	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++
++	data->dev = &client->dev;
++	data->pmic = client;
++	mutex_init(&data->lock);
++	i2c_set_clientdata(client, data);
++
++	data->charger = devm_i2c_new_dummy_device(&client->dev,
++						  client->adapter,
++						  MAX77865_I2C_CHARGER);
++	if (IS_ERR(data->charger))
++		return dev_err_probe(&client->dev, PTR_ERR(data->charger),
++				     "failed to create charger client\n");
++
++	data->fuelgauge = devm_i2c_new_dummy_device(&client->dev,
++						   client->adapter,
++						   MAX77865_I2C_FUELGAUGE);
++	if (IS_ERR(data->fuelgauge))
++		return dev_err_probe(&client->dev, PTR_ERR(data->fuelgauge),
++				     "failed to create fuel-gauge client\n");
++
++	id = i2c_smbus_read_byte_data(client, MAX77865_REG_PMIC_ID);
++	if (id < 0)
++		return dev_err_probe(&client->dev, id, "failed to read PMIC ID\n");
++	if (id != 0x54 && id != 0x65)
++		dev_warn(&client->dev, "unexpected PMIC ID 0x%02x\n", id);
++
++	psy_cfg.drv_data = data;
++	psy_cfg.fwnode = dev_fwnode(&client->dev);
++	data->battery = devm_power_supply_register(&client->dev,
++						   &max77865_battery_desc,
++						   &psy_cfg);
++	if (IS_ERR(data->battery))
++		return dev_err_probe(&client->dev, PTR_ERR(data->battery),
++				     "failed to register battery power supply\n");
++
++	data->usb = devm_power_supply_register(&client->dev, &max77865_usb_desc,
++						      &psy_cfg);
++	if (IS_ERR(data->usb))
++		return dev_err_probe(&client->dev, PTR_ERR(data->usb),
++				     "failed to register USB power supply\n");
++
++	INIT_DELAYED_WORK(&data->poll_work, max77865_power_poll);
++	schedule_delayed_work(&data->poll_work, msecs_to_jiffies(500));
++
++	dev_info(&client->dev, "MAX77854/65 battery monitor ready (ID 0x%02x)\n",
++		 id);
++	return 0;
++}
++
++static void max77865_power_remove(struct i2c_client *client)
++{
++	struct max77865_power *data = i2c_get_clientdata(client);
++
++	cancel_delayed_work_sync(&data->poll_work);
++	mutex_destroy(&data->lock);
++}
++
++static const struct of_device_id max77865_power_of_match[] = {
++	{ .compatible = "maxim,max77865" },
++	{ .compatible = "maxim,max77854" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, max77865_power_of_match);
++
++static const struct i2c_device_id max77865_power_id[] = {
++	{ "max77865-battery" },
++	{ "max77854-battery" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, max77865_power_id);
++
++static struct i2c_driver max77865_power_driver = {
++	.driver = {
++		.name = "max77865-battery",
++		.of_match_table = max77865_power_of_match,
++	},
++	.probe = max77865_power_probe,
++	.remove = max77865_power_remove,
++	.id_table = max77865_power_id,
++};
++module_i2c_driver(max77865_power_driver);
++
++MODULE_AUTHOR("LinuxS8 bring-up");
++MODULE_DESCRIPTION("Read-only MAX77854/MAX77865 battery and charger monitor");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/usb/typec/s2mm005.c b/drivers/usb/typec/s2mm005.c
+new file mode 100644
+index 000000000..aa2704bf9
+--- /dev/null
++++ b/drivers/usb/typec/s2mm005.c
+@@ -0,0 +1,245 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung S2MM005 USB-C CCIC, first mainline bring-up driver.
++ *
++ * The controller contains its own Type-C/PD state machine.  This initial
++ * driver intentionally stops at the smallest useful boundary: it performs
++ * the vendor wake/reset sequence, owns the CCIC interrupt, logs the function
++ * state, and clears the interrupt SRAM.  It does not invent a MUIC routing
++ * command or pretend to implement PD policy yet.
++ *
++ * The register transactions are taken from the vendor tree:
++ * downstream-8895/drivers/ccic/s2mm005.c and s2mm005_cc.c.
++ */
++
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/regmap.h>
++#include <linux/slab.h>
++#include <linux/workqueue.h>
++
++#define S2MM005_CMD_REG		0x0010
++#define S2MM005_FUNC_STATE_REG	0x0020
++#define S2MM005_STATUS_REG	0x0030
++#define S2MM005_LP_STATE_REG	0x0060
++
++struct s2mm005 {
++	struct device *dev;
++	struct regmap *regmap;
++	struct delayed_work initial_state_work;
++};
++
++static const struct regmap_config s2mm005_regmap_config = {
++	.reg_bits = 16,
++	.val_bits = 8,
++	.max_register = 0xffff,
++	.val_format_endian = REGMAP_ENDIAN_NATIVE,
++	.cache_type = REGCACHE_NONE,
++};
++
++static int s2mm005_read_state(struct s2mm005 *ccic, const char *where)
++{
++	u8 func[4], lp[4];
++	u32 func_word, lp_word;
++	int ret;
++
++	ret = regmap_bulk_read(ccic->regmap, S2MM005_FUNC_STATE_REG,
++				func, sizeof(func));
++	if (ret)
++		return ret;
++
++	ret = regmap_bulk_read(ccic->regmap, S2MM005_LP_STATE_REG,
++				lp, sizeof(lp));
++	if (ret)
++		return ret;
++
++	func_word = func[0] | (u32)func[1] << 8 |
++			(u32)func[2] << 16 | (u32)func[3] << 24;
++	lp_word = lp[0] | (u32)lp[1] << 8 |
++		  (u32)lp[2] << 16 | (u32)lp[3] << 24;
++
++	dev_info(ccic->dev,
++		 "%s: func=0x%08x pd_state=%u attach=%u source=%u dfp=%u "
++		 "reset=%u lp=0x%08x\n", where, func_word, func[0],
++		 !!(func_word & BIT(24)), !!(func_word & BIT(25)),
++		 !!(func_word & BIT(26)), !!(func_word & BIT(31)), lp_word);
++
++	return 0;
++}
++
++static int s2mm005_reset(struct s2mm005 *ccic)
++{
++	u8 wake;
++	u8 command[] = { 0x02, 0x01, 0x1c, 0x10, 0x01 };
++	int i, ret;
++
++	/* Exact vendor s2mm005_reset(): five reads of register 0x0008. */
++	for (i = 0; i < 5; i++) {
++		ret = regmap_bulk_read(ccic->regmap, 0x0008, &wake, 1);
++		if (ret)
++			return ret;
++	}
++
++	/* Exact vendor command: 02 01 1c 10 01 at register 0x0010. */
++	ret = regmap_bulk_write(ccic->regmap, S2MM005_CMD_REG,
++				command, sizeof(command));
++	if (ret)
++		return ret;
++
++	msleep(100);
++	return 0;
++}
++
++static int s2mm005_clear_irq(struct s2mm005 *ccic)
++{
++	/* Exact vendor s2mm005_int_clear(): one byte, value 0x01, at 0x0010. */
++	return regmap_write(ccic->regmap, S2MM005_CMD_REG, 0x01);
++}
++
++static int s2mm005_enable_auto_lpm(struct s2mm005 *ccic)
++{
++	u8 wake;
++	u8 command[] = { 0x0f, 0x06 };
++	int i, ret;
++
++	/* Exact vendor s2mm005_manual_LPM(..., 6): five wake reads. */
++	for (i = 0; i < 5; i++) {
++		ret = regmap_bulk_read(ccic->regmap, 0x0008, &wake, 1);
++		if (ret)
++			return ret;
++	}
++
++	/* Exact vendor probe command: 0f 06 at register 0x0010. */
++	udelay(10);
++	return regmap_bulk_write(ccic->regmap, S2MM005_CMD_REG,
++				 command, sizeof(command));
++}
++
++static irqreturn_t s2mm005_irq_thread(int irq, void *data)
++{
++	struct s2mm005 *ccic = data;
++	u8 status[48];
++	int ret;
++
++	/* Vendor process_cc_get_int_status() reads the 48-byte SRAM first. */
++	ret = regmap_bulk_read(ccic->regmap, S2MM005_STATUS_REG,
++				status, sizeof(status));
++	if (ret) {
++		dev_err(ccic->dev, "IRQ status read failed: %d\n", ret);
++		return IRQ_HANDLED;
++	}
++
++	ret = s2mm005_read_state(ccic, "IRQ");
++	if (ret)
++		dev_err(ccic->dev, "state read after IRQ failed: %d\n", ret);
++
++	ret = s2mm005_clear_irq(ccic);
++	if (ret)
++		dev_err(ccic->dev, "IRQ clear failed: %d\n", ret);
++
++	dev_dbg(ccic->dev, "IRQ SRAM: %*ph\n", 8, status);
++	return IRQ_HANDLED;
++}
++
++static void s2mm005_initial_state_work(struct work_struct *work)
++{
++	struct s2mm005 *ccic = container_of(to_delayed_work(work),
++					   struct s2mm005, initial_state_work);
++	int ret;
++
++	ret = s2mm005_read_state(ccic, "boot+200ms");
++	if (ret)
++		dev_err(ccic->dev, "delayed state read failed: %d\n", ret);
++}
++
++static void s2mm005_cancel_work(void *data)
++{
++	struct s2mm005 *ccic = data;
++
++	cancel_delayed_work_sync(&ccic->initial_state_work);
++}
++
++static int s2mm005_probe(struct i2c_client *client)
++{
++	struct s2mm005 *ccic;
++	int ret;
++
++	ccic = devm_kzalloc(&client->dev, sizeof(*ccic), GFP_KERNEL);
++	if (!ccic)
++		return -ENOMEM;
++
++	ccic->dev = &client->dev;
++	ccic->regmap = devm_regmap_init_i2c(client, &s2mm005_regmap_config);
++	if (IS_ERR(ccic->regmap))
++		return dev_err_probe(&client->dev, PTR_ERR(ccic->regmap),
++				     "regmap init failed\n");
++
++	i2c_set_clientdata(client, ccic);
++
++	ret = s2mm005_reset(ccic);
++	if (ret)
++		return dev_err_probe(&client->dev, ret, "reset failed\n");
++
++	ret = s2mm005_enable_auto_lpm(ccic);
++	if (ret)
++		return dev_err_probe(&client->dev, ret, "auto LPM enable failed\n");
++
++	ret = s2mm005_clear_irq(ccic);
++	if (ret)
++		return dev_err_probe(&client->dev, ret, "initial IRQ clear failed\n");
++
++	ret = s2mm005_read_state(ccic, "probe");
++	if (ret)
++		return dev_err_probe(&client->dev, ret, "probe state read failed\n");
++
++	if (client->irq <= 0)
++		return dev_err_probe(&client->dev, -EINVAL,
++				     "missing CCIC interrupt\n");
++
++	ret = devm_request_threaded_irq(&client->dev, client->irq, NULL,
++				       s2mm005_irq_thread,
++				       IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
++				       "s2mm005", ccic);
++	if (ret)
++		return dev_err_probe(&client->dev, ret, "IRQ request failed\n");
++
++	INIT_DELAYED_WORK(&ccic->initial_state_work, s2mm005_initial_state_work);
++	ret = devm_add_action_or_reset(&client->dev, s2mm005_cancel_work, ccic);
++	if (ret)
++		return ret;
++	/* The userspace source-backed reset probe observes the new state after
++	 * roughly one second; keep this diagnostic check after that settle time. */
++	schedule_delayed_work(&ccic->initial_state_work, msecs_to_jiffies(1200));
++
++	dev_info(&client->dev, "diagnostic CCIC driver active, IRQ %d\n",
++		 client->irq);
++	return 0;
++}
++
++static const struct of_device_id s2mm005_of_match[] = {
++	{ .compatible = "samsung,s2mm005" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, s2mm005_of_match);
++
++static const struct i2c_device_id s2mm005_i2c_ids[] = {
++	{ "s2mm005", 0 },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, s2mm005_i2c_ids);
++
++static struct i2c_driver s2mm005_driver = {
++	.driver = {
++		.name = "s2mm005",
++		.of_match_table = s2mm005_of_match,
++	},
++	.probe = s2mm005_probe,
++	.id_table = s2mm005_i2c_ids,
++};
++module_i2c_driver(s2mm005_driver);
++
++MODULE_DESCRIPTION("Samsung S2MM005 USB-C CCIC bring-up driver");
++MODULE_LICENSE("GPL");
