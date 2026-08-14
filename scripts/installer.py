@@ -36,10 +36,23 @@ def say(message: str = "") -> None:
 
 
 def run(command: list[str], *, check: bool = True, capture: bool = False,
-        cwd: Path | None = None, env: dict[str, str] | None = None):
+        cwd: Path | None = None, env: dict[str, str] | None = None,
+        quiet_log: Path | None = None, show_command: bool = True):
     shown = " ".join(str(item) for item in command)
-    say(f"$ {shown}")
+    if show_command:
+        say(f"$ {shown}")
     try:
+        if quiet_log and not capture:
+            quiet_log.parent.mkdir(parents=True, exist_ok=True)
+            with quiet_log.open("a", encoding="utf-8") as log:
+                return subprocess.run(
+                    [str(item) for item in command],
+                    cwd=str(cwd) if cwd else None,
+                    env=env,
+                    check=check,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
         return subprocess.run(
             [str(item) for item in command],
             cwd=str(cwd) if cwd else None,
@@ -223,8 +236,18 @@ def ensure_build_dependencies(root: Path) -> None:
             "Установите зависимости вручную: apt-get update && apt-get install -y "
             + " ".join(packages)
         )
-    run([*install_prefix, "update"])
-    run([*install_prefix, "install", "-y", *packages])
+    log_file = root / "build" / "installer" / "dependency-install.log"
+    try:
+        say(">> обновляю список пакетов (подробности в журнале)")
+        run([*install_prefix, "update"], quiet_log=log_file, show_command=False)
+        say(">> устанавливаю зависимости сборки")
+        run([*install_prefix, "install", "-y", *packages], quiet_log=log_file, show_command=False)
+    except UserAbort:
+        say(f"Установка зависимостей остановлена. Журнал: {log_file}")
+        if log_file.is_file():
+            say("Последние строки журнала:")
+            print("".join(log_file.read_text(encoding="utf-8", errors="replace").splitlines(True)[-25:]))
+        raise
 
 
 def build_rootfs(root: Path, suite: str, desktop: str, user: str,
@@ -279,7 +302,7 @@ def build_rootfs(root: Path, suite: str, desktop: str, user: str,
                 if not shutil.which("sudo"):
                     raise UserAbort("Нужен root или sudo для debootstrap.")
                 command = ["sudo", "-E", *command]
-        run(command, cwd=root)
+        run(command, cwd=root, show_command=False)
     finally:
         try:
             secret_path.unlink()

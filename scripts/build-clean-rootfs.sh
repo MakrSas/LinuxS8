@@ -111,6 +111,21 @@ else
 	mkdir -p "$OUT"
 fi
 
+LOG_FILE="${OUT}.log"
+: > "$LOG_FILE"
+on_error() {
+	status=$?
+	set +e
+	echo "!! сборка остановлена с кодом $status" >&2
+	echo "   полный журнал: $LOG_FILE" >&2
+	if [ -s "$LOG_FILE" ]; then
+		echo "   последние строки:" >&2
+		tail -n 30 "$LOG_FILE" >&2
+	fi
+	exit "$status"
+}
+trap on_error ERR
+
 cleanup_mounts() {
 	set +e
 	if mountpoint -q "$OUT/dev" 2>/dev/null; then umount -R "$OUT/dev"; fi
@@ -144,13 +159,17 @@ echo ">> Debian $SUITE arm64, desktop=$DESKTOP, scale=${SCALE}00%%"
 echo ">> output: $OUT"
 echo ">> bootstrap: $BOOTSTRAP_MODE"
 
+echo ">> скачиваю и распаковываю базовую систему Debian"
 if [ "$BOOTSTRAP_MODE" = qemu-debootstrap ]; then
-	qemu-debootstrap --arch=arm64 --variant=minbase "$SUITE" "$OUT" "$MIRROR"
+	qemu-debootstrap --arch=arm64 --variant=minbase "$SUITE" "$OUT" "$MIRROR" \
+		>>"$LOG_FILE" 2>&1
 else
 	if [ "$BOOTSTRAP_MODE" = native ]; then
-		debootstrap --arch=arm64 --variant=minbase "$SUITE" "$OUT" "$MIRROR"
+		debootstrap --arch=arm64 --variant=minbase "$SUITE" "$OUT" "$MIRROR" \
+			>>"$LOG_FILE" 2>&1
 	else
-		debootstrap --foreign --arch=arm64 --variant=minbase "$SUITE" "$OUT" "$MIRROR"
+		debootstrap --foreign --arch=arm64 --variant=minbase "$SUITE" "$OUT" "$MIRROR" \
+			>>"$LOG_FILE" 2>&1
 		install -m 0755 /usr/bin/qemu-aarch64-static "$OUT/usr/bin/qemu-aarch64-static"
 	fi
 fi
@@ -163,7 +182,9 @@ mount --rbind /dev "$OUT/dev"
 mount --make-rslave "$OUT/dev"
 
 if [ "$BOOTSTRAP_MODE" = foreign ]; then
-	chroot "$OUT" /debootstrap/debootstrap --second-stage
+	echo ">> завершаю второй этап Debian bootstrap"
+	chroot "$OUT" /debootstrap/debootstrap --second-stage \
+		>>"$LOG_FILE" 2>&1
 fi
 
 cat > "$OUT/etc/apt/sources.list" <<EOF
@@ -203,7 +224,8 @@ chroot_env() {
 		"$@"
 }
 
-chroot_env apt-get update
+echo ">> устанавливаю системные пакеты и графическую оболочку"
+chroot_env apt-get update >>"$LOG_FILE" 2>&1
 
 COMMON_PACKAGES=(
 	systemd systemd-sysv dbus sudo openssh-server network-manager
@@ -217,10 +239,12 @@ else
 	DESKTOP_PACKAGES=(gdm3 gnome-core)
 fi
 
-chroot_env apt-get install -y "${COMMON_PACKAGES[@]}" "${DESKTOP_PACKAGES[@]}"
+chroot_env apt-get install -y "${COMMON_PACKAGES[@]}" "${DESKTOP_PACKAGES[@]}" \
+	>>"$LOG_FILE" 2>&1
 
 printf 'en_US.UTF-8 UTF-8\n' > "$OUT/etc/locale.gen"
-chroot_env locale-gen en_US.UTF-8
+echo ">> генерирую локаль и настраиваю систему"
+chroot_env locale-gen en_US.UTF-8 >>"$LOG_FILE" 2>&1
 ln -sf /usr/share/zoneinfo/UTC "$OUT/etc/localtime"
 printf 'UTC\n' > "$OUT/etc/timezone"
 
@@ -235,7 +259,7 @@ env -i \
 	LINUX_ROOT_LABEL="$ROOT_LABEL" \
 	LINUX_SCALE="$SCALE" \
 	LINUX_USER_PASSWORD="${LINUX_USER_PASSWORD:-}" \
-	chroot "$OUT" /root/setup-rootfs-session.sh
+	chroot "$OUT" /root/setup-rootfs-session.sh >>"$LOG_FILE" 2>&1
 rm -f "$OUT/root/setup-rootfs-session.sh"
 
 # Конфигурация, не содержащая пользовательских данных, для рабочего образа.
@@ -260,8 +284,9 @@ fi
 if [ -n "$KERNEL_TREE" ]; then
 	KERNEL_TREE="$(readlink -f "$KERNEL_TREE")"
 	[ -d "$KERNEL_TREE" ] || { echo "нет kernel tree: $KERNEL_TREE" >&2; exit 1; }
-	echo ">> устанавливаю модули из $KERNEL_TREE"
-	make -C "$KERNEL_TREE" INSTALL_MOD_PATH="$OUT" INSTALL_MOD_STRIP=1 modules_install
+	echo ">> устанавливаю модули ядра"
+	make -C "$KERNEL_TREE" INSTALL_MOD_PATH="$OUT" INSTALL_MOD_STRIP=1 modules_install \
+		>>"$LOG_FILE" 2>&1
 	find "$OUT/lib/modules" -type l -delete 2>/dev/null || true
 fi
 
@@ -283,11 +308,12 @@ rm -f "$OUT/usr/sbin/policy-rc.d"
 rm -f "$OUT/usr/bin/qemu-aarch64-static"
 sync
 
-echo ">> упаковываю $ARCHIVE"
+echo ">> очищаю временные данные и упаковываю образ"
 tar --numeric-owner --xattrs --acls \
 	--exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' \
 	--exclude='./tmp/*' --exclude='./root/.bash_history' \
-	-C "$OUT" -czf "$ARCHIVE" .
+	-C "$OUT" -czf "$ARCHIVE" . >>"$LOG_FILE" 2>&1
 sha256sum "$ARCHIVE"
 echo "=== clean Debian rootfs готов ==="
 echo "Архив: $ARCHIVE"
+echo "Журнал: $LOG_FILE"
