@@ -54,7 +54,7 @@ route_usb_switches() {
 	fi
 	echo "USB-C I2C: ccic=$ccic_bus muic=$muic_bus"
 
-	muic_id=$(i2ctransfer -y "$muic_bus" w1@0x25 0x00 r1 |
+	muic_id=$(i2ctransfer -f -y "$muic_bus" w1@0x25 0x00 r1 |
 		tr -d '[:space:]\r')
 	[ "$muic_id" = "0x65" ] || {
 		echo "неожиданный MAX77865 MUIC ID: $muic_id" >&2
@@ -62,8 +62,8 @@ route_usb_switches() {
 	}
 
 	# Vendor COM_USB_AP: D+/D- -> AP USB, no BC comparator.
-	i2ctransfer -y "$muic_bus" w2@0x25 0x19 0x89
-	muic_route=$(i2ctransfer -y "$muic_bus" w1@0x25 0x19 r1 |
+	i2ctransfer -f -y "$muic_bus" w2@0x25 0x19 0x89
+	muic_route=$(i2ctransfer -f -y "$muic_bus" w1@0x25 0x19 r1 |
 		tr -d '[:space:]\r')
 	[ "$muic_route" = "0x89" ] || {
 		echo "MAX77865 MUIC route readback failed: $muic_route" >&2
@@ -71,9 +71,9 @@ route_usb_switches() {
 	}
 
 	# Vendor TYPE_C_ATTACH_UFP: detach, then re-attach as sink/UFP.
-	i2ctransfer -y "$ccic_bus" w4@0x33 0x00 0x10 0x03 0x12
+	i2ctransfer -f -y "$ccic_bus" w4@0x33 0x00 0x10 0x03 0x12
 	sleep 1
-	i2ctransfer -y "$ccic_bus" w4@0x33 0x00 0x10 0x03 0x14
+	i2ctransfer -f -y "$ccic_bus" w4@0x33 0x00 0x10 0x03 0x14
 	sleep 1
 	echo "USB-C route: MAX77865=0x89, S2MM005=UFP"
 }

@@ -250,15 +250,30 @@ def ensure_build_dependencies(root: Path) -> None:
         raise
 
 
+def rootfs_configured(output: Path) -> bool:
+    """Пакеты поставлены и настройка прошла: можно доделать без скачивания."""
+    if (output / ".linuxs8-configured").is_file():
+        return True
+    log = Path(str(output) + ".log")
+    try:
+        return "=== setup-rootfs-session.sh done ===" in log.read_text(errors="replace")
+    except OSError:
+        return False
+
+
 def build_rootfs(root: Path, suite: str, desktop: str, user: str,
                  hostname: str, label: str, scale: str, password: str) -> Path:
     output = root / "build" / "installer" / f"rootfs-{suite}-{desktop}-scale{scale}"
     archive = Path(str(output) + ".tar.gz")
     clean_output = False
+    resume = False
     if archive.is_file():
         if yes_no(f"Найден готовый локальный rootfs {archive}. Использовать его", True):
             return archive
         clean_output = True
+    elif rootfs_configured(output) and yes_no(
+            f"Найден уже настроенный rootfs {output}. Доделать его без повторного скачивания", True):
+        resume = True
     elif output.is_dir() and any(output.iterdir()):
         say(f"Найден незавершённый rootfs: {output}")
         clean_output = yes_no("Очистить его и начать сборку заново", True)
@@ -287,6 +302,8 @@ def build_rootfs(root: Path, suite: str, desktop: str, user: str,
     ]
     if clean_output:
         args.append("--clean-output")
+    if resume:
+        args.append("--resume")
     kernel_tree = root / "build" / "src" / "linux"
     if kernel_tree.is_dir():
         args.extend(["--kernel-tree", str(kernel_tree)])
@@ -440,7 +457,7 @@ def format_and_extract(adb: Adb, label: str) -> None:
         "fi",
         "mkdir -p /mnt/linuxroot",
         "mount -t ext4 \"$TARGET\" /mnt/linuxroot",
-        "tar -xzf /tmp/linuxs8-rootfs.tar.gz -C /mnt/linuxroot",
+        "gzip -dc /tmp/linuxs8-rootfs.tar.gz | tar -xpf - -C /mnt/linuxroot",
         "test -x /mnt/linuxroot/sbin/init",
         "sync",
         "rm -f /tmp/linuxs8-rootfs.tar.gz",

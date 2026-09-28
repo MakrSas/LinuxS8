@@ -2701,3 +2701,41 @@ WSL2. Подробности — в `docs/INSTALL.md`.
 5206 строк, sha256
 `ce3b075b286799ebc464ad7321f3ce3d191182f5e085a8c530af7dc0e4c696ae`, reverse
 `git apply --check` проходит.
+
+## 2026-09-28 · Wi-Fi BCM4361 по PCIe работает, SSH по воздуху
+
+Чистый Debian (trixie, Phosh) поставлен установщиком; по дороге исправлены
+установщик и сборщик rootfs: `set -e` на отсутствующих юнитах, кросс-strip
+модулей, продолжение сборки без повторного скачивания, распаковка через
+`gzip -dc | tar` (у busybox TWRP нет +x), пакеты `kbd`, `gnome-session`,
+`xwayland`, `systemd-timesyncd`, `wpasupplicant iw pciutils`,
+blacklist `exynosdrm` (иначе он выбивает simpledrm и phoc без экрана).
+
+Wi-Fi:
+- `drivers/pci/controller/dwc/pcie-exynos8895.c` (модуль) — вендорская
+  последовательность PHY/PMU/ELBI поверх dwc, WLAN_REG_ON (gpj1-3), до 10
+  попыток поднять линк; без MSI (пустой `msi_init`), INTx по фронту
+  (ELBI IRQ_PULSE — импульс, GIC SPI 345 edge).
+- `pcie-exynos8895-quirk.c` (встроенный): BAR2 = 0x11800000 (3 МиБ),
+  окно root port вручную, `preserve_config`. BAR2 чипа аппаратно декодирует
+  все 4 МиБ, поэтому BAR0 на шине — 0x11c00000, CPU видит его по
+  0x11b00000 через iATU 2 (как вендор).
+- brcmfmac: BCM4361 (chip 0x4361, PCI 0x441f/0x4420/0x4421, rambase
+  0x170000), прошивка `brcmfmac4361b0-pcie.bin` = стоковая bcmdhd_sta.bin_b0,
+  NVRAM `nvram.txt_r02j_b0` (Semco SWB-E32 R02 — её грузил Android на этом
+  телефоне), MAC из EFS.
+- Итог: `wlp1s0`, скан 2.4/5 ГГц, подключение через Phosh, SSH по Wi-Fi.
+
+MAX77865: ток и температура больше не путаются с кодом ошибки, VCELL
+считается в 64 битах (было `voltage_now: -6990`).
+
+Грабли:
+- Программная перезагрузка из Debian виснет — только руками.
+- `dd` в sda7 из Debian теряется после принудительной перезагрузки (кэш
+  записи UFS не сбрасывается). Boot-образы — только из TWRP; после записи
+  файлов в Debian — `sync; blockdev --flushbufs /dev/sda`.
+- Выгрузка/повторная загрузка pcie_exynos8895 вешает систему.
+
+Открыто: MAC интерфейса случайный (NVRAM macaddr не применился), P2P-iface
+не создаётся, flush кэша UFS, BAR/ATU-переназначение из модуля — перенести
+в ядро.

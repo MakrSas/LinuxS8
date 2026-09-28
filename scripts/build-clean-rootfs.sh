@@ -18,6 +18,8 @@ OUT=""
 KERNEL_TREE=""
 PASSWORD_FILE=""
 CLEAN_OUTPUT=0
+RESUME=0
+CONFIGURED_MARK=".linuxs8-configured"
 
 usage() {
 	cat <<'EOF'
@@ -56,6 +58,7 @@ while [ "$#" -gt 0 ]; do
 	--kernel-tree) KERNEL_TREE="${2:?--kernel-tree требует значения}"; shift 2 ;;
 	--password-file) PASSWORD_FILE="${2:?--password-file требует значения}"; shift 2 ;;
 	--clean-output) CLEAN_OUTPUT=1; shift ;;
+	--resume)       RESUME=1; shift ;;
 	--help|-h)     usage; exit 0 ;;
 	*)             echo "неизвестный параметр: $1" >&2; usage >&2; exit 2 ;;
 	esac
@@ -106,7 +109,12 @@ case "$OUT" in
 	/|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/mnt|/opt|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var|"$ROOT"|"$ROOT/build")
 		echo "опасный каталог вывода: $OUT" >&2; exit 2 ;;
 esac
-if [ -e "$OUT" ]; then
+SKIP_BASE=0
+if [ "$RESUME" -eq 1 ] && { [ -f "$OUT/$CONFIGURED_MARK" ] ||
+	grep -q "^=== setup-rootfs-session.sh done ===" "${OUT}.log" 2>/dev/null; }; then
+	# Пакеты и настройка уже сделаны прошлым запуском; доделываем хвост.
+	SKIP_BASE=1
+elif [ -e "$OUT" ]; then
 	[ -d "$OUT" ] || { echo "output существует и не является каталогом: $OUT" >&2; exit 1; }
 	if [ -n "$(find "$OUT" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
 		if [ "$CLEAN_OUTPUT" -ne 1 ]; then
@@ -132,6 +140,10 @@ else
 fi
 
 LOG_FILE="${OUT}.log"
+if [ "$SKIP_BASE" -eq 1 ]; then
+	echo ">> продолжаю с уже настроенного rootfs"
+	echo "=== resume $(date) ===" >> "$LOG_FILE"
+else
 : > "$LOG_FILE"
 on_error() {
 	status=$?
@@ -153,6 +165,7 @@ cleanup_mounts() {
 	if mountpoint -q "$OUT/proc" 2>/dev/null; then umount -R "$OUT/proc"; fi
 	if [ -e "$OUT/usr/bin/qemu-aarch64-static" ]; then
 		rm -f "$OUT/usr/bin/qemu-aarch64-static"
+rm -f "$OUT/$CONFIGURED_MARK"
 	fi
 }
 trap cleanup_mounts EXIT
@@ -250,11 +263,11 @@ chroot_env apt-get update >>"$LOG_FILE" 2>&1
 COMMON_PACKAGES=(
 	systemd systemd-sysv dbus sudo openssh-server network-manager
 	ca-certificates locales tzdata kmod udev e2fsprogs mount procps
-	iproute2 i2c-tools less nano
+	iproute2 i2c-tools less nano kbd systemd-timesyncd wpasupplicant iw pciutils
 )
 DESKTOP_PACKAGES=()
 if [ "$DESKTOP" = phosh ]; then
-	DESKTOP_PACKAGES=(phosh phoc squeekboard)
+	DESKTOP_PACKAGES=(phosh phoc squeekboard gnome-session xwayland)
 else
 	DESKTOP_PACKAGES=(gdm3 gnome-core)
 fi
@@ -281,6 +294,8 @@ env -i \
 	LINUX_USER_PASSWORD="${LINUX_USER_PASSWORD:-}" \
 	chroot "$OUT" /root/setup-rootfs-session.sh >>"$LOG_FILE" 2>&1
 rm -f "$OUT/root/setup-rootfs-session.sh"
+touch "$OUT/$CONFIGURED_MARK"
+fi # SKIP_BASE
 
 # Конфигурация, не содержащая пользовательских данных, для рабочего образа.
 if [ -f "$ROOT/patches/systemd/phosh-dreamlte.conf" ]; then
@@ -305,9 +320,31 @@ if [ -n "$KERNEL_TREE" ]; then
 	KERNEL_TREE="$(readlink -f "$KERNEL_TREE")"
 	[ -d "$KERNEL_TREE" ] || { echo "нет kernel tree: $KERNEL_TREE" >&2; exit 1; }
 	echo ">> устанавливаю модули ядра"
-	make -C "$KERNEL_TREE" INSTALL_MOD_PATH="$OUT" INSTALL_MOD_STRIP=1 modules_install \
+	# Модули arm64: нужен кросс-strip, хостовый x86 strip их не понимает.
+	if [ -f "$ROOT/build/toolchain/env.sh" ]; then
+		# env.sh не рассчитан на set -u (LD_LIBRARY_PATH может быть не задан)
+		set +u
+		# shellcheck source=/dev/null
+		. "$ROOT/build/toolchain/env.sh"
+		set -u
+	fi
+	rm -rf "$OUT/lib/modules"
+	make -C "$KERNEL_TREE" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" INSTALL_MOD_PATH="$OUT" INSTALL_MOD_STRIP=1 modules_install \
 		>>"$LOG_FILE" 2>&1
 	find "$OUT/lib/modules" -type l -delete 2>/dev/null || true
+fi
+
+if [ -f "$ROOT/patches/modprobe/dreamlte-safe-kms.conf" ]; then
+	install -D -m 0644 "$ROOT/patches/modprobe/dreamlte-safe-kms.conf" \
+		"$OUT/etc/modprobe.d/dreamlte-safe-kms.conf"
+fi
+
+# Прошивка Wi-Fi BCM4361 из стокового vendor (только в локальную сборку,
+# в git она не попадает): build/wifi-firmware/brcm/brcmfmac4361b0-pcie.*
+if [ -d "$ROOT/build/wifi-firmware/brcm" ]; then
+	echo ">> кладу прошивку Wi-Fi"
+	mkdir -p "$OUT/lib/firmware/brcm"
+	cp "$ROOT/build/wifi-firmware/brcm/"* "$OUT/lib/firmware/brcm/"
 fi
 
 # В чистом образе не должно остаться идентификатора сборочной машины,

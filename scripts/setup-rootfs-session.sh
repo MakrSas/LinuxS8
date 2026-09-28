@@ -184,12 +184,12 @@ fi
 
 # --- 7. Выключить всё, что ждёт сеть или диск --------------------------
 # Без этого загрузка упирается в таймауты по 90-120 секунд на каждом.
-systemctl disable NetworkManager-wait-online.service 2>/dev/null
-systemctl mask   NetworkManager-wait-online.service 2>/dev/null
-systemctl mask   systemd-networkd-wait-online.service 2>/dev/null
-systemctl disable e2scrub_all.timer 2>/dev/null
-systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null
-systemctl disable man-db.timer 2>/dev/null
+systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
+systemctl mask   NetworkManager-wait-online.service 2>/dev/null || true
+systemctl mask   systemd-networkd-wait-online.service 2>/dev/null || true
+systemctl disable e2scrub_all.timer 2>/dev/null || true
+systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+systemctl disable man-db.timer 2>/dev/null || true
 
 # --- 8. Часы -----------------------------------------------------------
 # RTC в mainline для этого устройства нет, система стартует из 1970-го.
@@ -198,7 +198,7 @@ systemctl disable man-db.timer 2>/dev/null
 # future" на каждом файле и чтобы журнал был читаемым.
 mkdir -p /var/lib/systemd/timesync
 touch /var/lib/systemd/timesync/clock
-systemctl enable systemd-timesyncd.service 2>/dev/null
+systemctl enable systemd-timesyncd.service 2>/dev/null || true
 
 # --- 9. Не тянуть GDM в бесконечный перезапуск -------------------------
 # Если gnome-shell не заведётся, GDM по умолчанию перезапускается вечно и
@@ -244,7 +244,7 @@ EOF
 # Печатать в неё некому и набрать в ней нечего (клавиатуры нет), но если
 # GDM не стартует, живой getty на экране — это хотя бы признак того, что
 # сама система дошла до multi-user.
-systemctl enable getty@tty1.service 2>/dev/null
+systemctl enable getty@tty1.service 2>/dev/null || true
 
 sync
 echo "=== setup-rootfs-session.sh done ==="
