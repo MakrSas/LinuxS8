@@ -1,5 +1,5 @@
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
-index 305dc72f9..4c2a4feae 100644
+index 305dc72f9..6c436853d 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
 +++ b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
 @@ -26,13 +26,52 @@ chosen {
@@ -32,7 +32,7 @@ index 305dc72f9..4c2a4feae 100644
 +		 * ("efi: UEFI not found" строкой выше в том же журнале), так
 +		 * что генератору тут делать нечего в принципе.
 +		 */
-+		bootargs = "clk_ignore_unused pd_ignore_unused systemd.gpt_auto=0 console=ttySAC0,115200 console=tty0";
++		bootargs = "clk_ignore_unused pd_ignore_unused systemd.gpt_auto=0 console=ttySAC0,115200 console=tty0 cma=128M";
 +
  		framebuffer: framebuffer@cc000000 {
  			compatible = "simple-framebuffer";
@@ -410,7 +410,7 @@ index 305dc72f9..4c2a4feae 100644
  
  	status = "okay";
  };
-@@ -194,3 +527,24 @@ &usi9 {
+@@ -194,3 +527,39 @@ &usi9 {
  	samsung,mode = <USI_MODE_I2C0_1>;
  	status = "okay";
  };
@@ -434,6 +434,21 @@ index 305dc72f9..4c2a4feae 100644
 +
 +&sd2_bus4 {
 +	samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++};
++
++/*
++ * 2026-09-28: native KMS как подхват пути S-Boot (DECON0 окно 5, DMA-канал 5,
++ * IDMA 0x128b1000). DSIM/панель/DSC не трогаются, драйвер только меняет адрес
++ * кадра. Проверено вручную через /dev/mem.
++ */
++/ {
++	decon_takeover: display@12860000 {
++		compatible = "samsung,exynos8895-decon-takeover";
++		reg = <0x0 0x12860000 0x10000>,
++		      <0x0 0x128b1000 0x1000>,
++		      <0x0 0xcc000000 (1440 * 2960 * 4)>;
++		reg-names = "decon", "idma", "boot-fb";
++	};
 +};
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-pinctrl.dtsi b/arch/arm64/boot/dts/exynos/exynos8895-pinctrl.dtsi
 index 16903ce63..740b5d8c6 100644
@@ -3131,6 +3146,450 @@ index 000000000..c2fab2ab1
 +module_mipi_dsi_driver(s6e3ha6_driver);
 +
 +MODULE_DESCRIPTION("Samsung S6E3HA6 AMOLED panel");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/tiny/Kconfig b/drivers/gpu/drm/tiny/Kconfig
+index f0e72d4b6..795125938 100644
+--- a/drivers/gpu/drm/tiny/Kconfig
++++ b/drivers/gpu/drm/tiny/Kconfig
+@@ -24,6 +24,17 @@ config DRM_ARCPGU
+ 
+ 	  If M is selected the module will be called arcpgu.
+ 
++config DRM_EXYNOS8895_TAKEOVER
++	tristate "Exynos8895 DECON takeover of the bootloader scanout"
++	depends on DRM && OF && (ARCH_EXYNOS || COMPILE_TEST)
++	select APERTURE_HELPERS
++	select DRM_CLIENT_SELECTION
++	select DRM_GEM_DMA_HELPER
++	select DRM_KMS_HELPER
++	help
++	  KMS driver for the Galaxy S8 panel that keeps the display pipeline
++	  set up by S-Boot and only flips the DECON window 5 scanout address.
++
+ config DRM_BOCHS
+ 	tristate "DRM Support for bochs dispi vga interface (qemu stdvga)"
+ 	depends on DRM && PCI && MMU
+diff --git a/drivers/gpu/drm/tiny/Makefile b/drivers/gpu/drm/tiny/Makefile
+index 48d30bf61..97958c4c0 100644
+--- a/drivers/gpu/drm/tiny/Makefile
++++ b/drivers/gpu/drm/tiny/Makefile
+@@ -2,6 +2,7 @@
+ 
+ obj-$(CONFIG_DRM_APPLETBDRM)		+= appletbdrm.o
+ obj-$(CONFIG_DRM_ARCPGU)		+= arcpgu.o
++obj-$(CONFIG_DRM_EXYNOS8895_TAKEOVER)	+= exynos8895-takeover.o
+ obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
+ obj-$(CONFIG_DRM_CIRRUS_QEMU)		+= cirrus-qemu.o
+ obj-$(CONFIG_DRM_GM12U320)		+= gm12u320.o
+diff --git a/drivers/gpu/drm/tiny/exynos8895-takeover.c b/drivers/gpu/drm/tiny/exynos8895-takeover.c
+new file mode 100644
+index 000000000..cc451532a
+--- /dev/null
++++ b/drivers/gpu/drm/tiny/exynos8895-takeover.c
+@@ -0,0 +1,404 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Exynos8895 DECON "takeover" KMS driver for the Galaxy S8 (dreamlte).
++ *
++ * S-Boot leaves the whole display pipeline running: DSIM, the S6E3HA6 panel,
++ * DSC and DECON0 window 5 fed by DMA channel 5 (IDMA at 0x128b1000), with the
++ * panel's TE driving the frame trigger. simpledrm then copies every frame into
++ * the bootloader's buffer at 0xcc000000.
++ *
++ * This driver keeps all of that untouched and only moves the scanout address:
++ * a page flip writes the new CMA buffer into IDMA BASE_ADDR_Y and requests a
++ * shadow update for window 5. No per-frame CPU copy, and panfrost renders
++ * straight into the scanout buffers through Mesa's kmsro ("exynos").
++ *
++ * Verified by hand on 2026-09-28: writing the address + SHADOW_UPDATE bit 5
++ * moves the picture on screen; the window 0 bit does nothing.
++ */
++
++#include <linux/aperture.h>
++#include <linux/dma-mapping.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#include <drm/clients/drm_client_setup.h>
++#include <drm/drm_atomic.h>
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_crtc_helper.h>
++#include <drm/drm_drv.h>
++#include <drm/drm_fb_dma_helper.h>
++#include <drm/drm_fbdev_dma.h>
++#include <drm/drm_fourcc.h>
++#include <drm/drm_framebuffer.h>
++#include <drm/drm_gem_atomic_helper.h>
++#include <drm/drm_gem_dma_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
++#include <drm/drm_managed.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drm_vblank.h>
++#include <drm/drm_vblank_helper.h>
++
++#define TO_WIDTH		1440
++#define TO_HEIGHT		2960
++#define TO_PITCH		(TO_WIDTH * 4)
++/* Panel active area, mm (5.8" 18.5:9) */
++#define TO_WIDTH_MM		65
++#define TO_HEIGHT_MM		134
++
++/* DECON0 */
++#define DECON_SHADOW_UPDATE	0x0060
++#define  SHADOW_UPDATE_GLOBAL	BIT(31)
++#define  SHADOW_UPDATE_WIN(w)	BIT(w)
++#define DECON_DATA_PATH_CTRL0	0x0214
++#define DECON_FRAME_ID		0x02a0
++#define TO_WIN			5
++
++/* IDMA of DMA channel 5 */
++#define IDMA_SRC_SIZE		0x0010
++#define IDMA_BASE_ADDR_Y	0x0040
++
++struct exynos_takeover {
++	struct drm_device drm;
++	void __iomem *decon;
++	void __iomem *idma;
++	phys_addr_t boot_fb_base;
++	resource_size_t boot_fb_size;
++
++	struct drm_plane plane;
++	struct drm_crtc crtc;
++	struct drm_encoder encoder;
++	struct drm_connector connector;
++};
++
++#define to_takeover(d)	container_of(d, struct exynos_takeover, drm)
++
++static const u32 takeover_formats[] = {
++	DRM_FORMAT_XRGB8888,
++	DRM_FORMAT_ARGB8888,
++};
++
++static void takeover_flip(struct exynos_takeover *to, dma_addr_t addr)
++{
++	writel(lower_32_bits(addr), to->idma + IDMA_BASE_ADDR_Y);
++	writel(SHADOW_UPDATE_GLOBAL | SHADOW_UPDATE_WIN(TO_WIN),
++	       to->decon + DECON_SHADOW_UPDATE);
++}
++
++/* plane ---------------------------------------------------------------- */
++
++static int takeover_plane_atomic_check(struct drm_plane *plane,
++				       struct drm_atomic_commit *state)
++{
++	struct drm_plane_state *ps = drm_atomic_get_new_plane_state(state, plane);
++	struct drm_crtc_state *cs = NULL;
++	struct drm_framebuffer *fb = ps->fb;
++	int ret;
++
++	if (ps->crtc)
++		cs = drm_atomic_get_new_crtc_state(state, ps->crtc);
++
++	ret = drm_atomic_helper_check_plane_state(ps, cs, DRM_PLANE_NO_SCALING,
++						  DRM_PLANE_NO_SCALING,
++						  false, false);
++	if (ret || !ps->visible)
++		return ret;
++
++	/*
++	 * The IDMA geometry is the one S-Boot programmed: full screen, no
++	 * offset, 5760-byte stride. Anything else would need reprogramming the
++	 * DMA, which this driver deliberately never does.
++	 */
++	if (fb->width != TO_WIDTH || fb->height != TO_HEIGHT ||
++	    fb->pitches[0] != TO_PITCH || fb->offsets[0] ||
++	    ps->src_x || ps->src_y || ps->crtc_x || ps->crtc_y ||
++	    fb->modifier != DRM_FORMAT_MOD_LINEAR)
++		return -EINVAL;
++
++	return 0;
++}
++
++static void takeover_plane_atomic_update(struct drm_plane *plane,
++					 struct drm_atomic_commit *state)
++{
++	struct exynos_takeover *to = to_takeover(plane->dev);
++	struct drm_plane_state *ps = drm_atomic_get_new_plane_state(state, plane);
++
++	if (!ps->fb || !ps->visible)
++		return;
++
++	takeover_flip(to, drm_fb_dma_get_gem_addr(ps->fb, ps, 0));
++}
++
++static void takeover_plane_atomic_disable(struct drm_plane *plane,
++					  struct drm_atomic_commit *state)
++{
++	struct exynos_takeover *to = to_takeover(plane->dev);
++
++	/* Nothing to blank safely: point the window back at S-Boot's buffer. */
++	takeover_flip(to, to->boot_fb_base);
++}
++
++static const struct drm_plane_helper_funcs takeover_plane_helper_funcs = {
++	.atomic_check = takeover_plane_atomic_check,
++	.atomic_update = takeover_plane_atomic_update,
++	.atomic_disable = takeover_plane_atomic_disable,
++};
++
++static const struct drm_plane_funcs takeover_plane_funcs = {
++	.update_plane = drm_atomic_helper_update_plane,
++	.disable_plane = drm_atomic_helper_disable_plane,
++	.destroy = drm_plane_cleanup,
++	.reset = drm_atomic_helper_plane_reset,
++	.atomic_duplicate_state = drm_atomic_helper_plane_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_plane_destroy_state,
++};
++
++/* crtc ----------------------------------------------------------------- */
++
++static int takeover_crtc_atomic_check(struct drm_crtc *crtc,
++				      struct drm_atomic_commit *state)
++{
++	struct drm_crtc_state *cs = drm_atomic_get_new_crtc_state(state, crtc);
++
++	if (!cs->enable)
++		return 0;
++
++	return drm_atomic_helper_check_crtc_primary_plane(cs);
++}
++
++static void takeover_crtc_atomic_enable(struct drm_crtc *crtc,
++					struct drm_atomic_commit *state)
++{
++	drm_crtc_vblank_on(crtc);
++}
++
++static void takeover_crtc_atomic_disable(struct drm_crtc *crtc,
++					 struct drm_atomic_commit *state)
++{
++	drm_crtc_vblank_off(crtc);
++}
++
++static const struct drm_crtc_helper_funcs takeover_crtc_helper_funcs = {
++	.atomic_check = takeover_crtc_atomic_check,
++	.atomic_flush = drm_crtc_vblank_atomic_flush,
++	.atomic_enable = takeover_crtc_atomic_enable,
++	.atomic_disable = takeover_crtc_atomic_disable,
++};
++
++static const struct drm_crtc_funcs takeover_crtc_funcs = {
++	.reset = drm_atomic_helper_crtc_reset,
++	.destroy = drm_crtc_cleanup,
++	.set_config = drm_atomic_helper_set_config,
++	.page_flip = drm_atomic_helper_page_flip,
++	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
++	DRM_CRTC_VBLANK_TIMER_FUNCS,
++};
++
++/* connector ------------------------------------------------------------ */
++
++/*
++ * DRM_MODE_INIT, not DRM_SIMPLE_MODE: the latter's 1 kHz pixel clock makes the
++ * vblank timer tick about once a day. The panel itself runs at 60 Hz off TE.
++ */
++
++static const struct drm_display_mode takeover_mode = {
++	DRM_MODE_INIT(60, TO_WIDTH, TO_HEIGHT, TO_WIDTH_MM, TO_HEIGHT_MM),
++};
++
++static int takeover_connector_get_modes(struct drm_connector *connector)
++{
++	return drm_connector_helper_get_modes_fixed(connector, &takeover_mode);
++}
++
++static const struct drm_connector_helper_funcs takeover_connector_helper_funcs = {
++	.get_modes = takeover_connector_get_modes,
++};
++
++static const struct drm_connector_funcs takeover_connector_funcs = {
++	.fill_modes = drm_helper_probe_single_connector_modes,
++	.destroy = drm_connector_cleanup,
++	.reset = drm_atomic_helper_connector_reset,
++	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
++};
++
++static const struct drm_encoder_funcs takeover_encoder_funcs = {
++	.destroy = drm_encoder_cleanup,
++};
++
++static const struct drm_mode_config_funcs takeover_mode_config_funcs = {
++	.fb_create = drm_gem_fb_create,
++	.atomic_check = drm_atomic_helper_check,
++	.atomic_commit = drm_atomic_helper_commit,
++};
++
++static int takeover_kms_init(struct exynos_takeover *to)
++{
++	struct drm_device *drm = &to->drm;
++	int ret;
++
++	ret = drmm_mode_config_init(drm);
++	if (ret)
++		return ret;
++
++	drm->mode_config.min_width = TO_WIDTH;
++	drm->mode_config.max_width = TO_WIDTH;
++	drm->mode_config.min_height = TO_HEIGHT;
++	drm->mode_config.max_height = TO_HEIGHT;
++	drm->mode_config.preferred_depth = 24;
++	drm->mode_config.funcs = &takeover_mode_config_funcs;
++
++	ret = drm_universal_plane_init(drm, &to->plane, 0, &takeover_plane_funcs,
++				       takeover_formats,
++				       ARRAY_SIZE(takeover_formats), NULL,
++				       DRM_PLANE_TYPE_PRIMARY, NULL);
++	if (ret)
++		return ret;
++	drm_plane_helper_add(&to->plane, &takeover_plane_helper_funcs);
++
++	ret = drm_crtc_init_with_planes(drm, &to->crtc, &to->plane, NULL,
++					&takeover_crtc_funcs, NULL);
++	if (ret)
++		return ret;
++	drm_crtc_helper_add(&to->crtc, &takeover_crtc_helper_funcs);
++
++	ret = drm_encoder_init(drm, &to->encoder, &takeover_encoder_funcs,
++			       DRM_MODE_ENCODER_DSI, NULL);
++	if (ret)
++		return ret;
++	to->encoder.possible_crtcs = drm_crtc_mask(&to->crtc);
++
++	ret = drm_connector_init(drm, &to->connector, &takeover_connector_funcs,
++				 DRM_MODE_CONNECTOR_DSI);
++	if (ret)
++		return ret;
++	drm_connector_helper_add(&to->connector,
++				 &takeover_connector_helper_funcs);
++	to->connector.status = connector_status_connected;
++	ret = drm_connector_attach_encoder(&to->connector, &to->encoder);
++	if (ret)
++		return ret;
++
++	ret = drm_vblank_init(drm, 1);
++	if (ret)
++		return ret;
++
++	drm_mode_config_reset(drm);
++	return 0;
++}
++
++/* driver --------------------------------------------------------------- */
++
++DEFINE_DRM_GEM_DMA_FOPS(takeover_fops);
++
++static const struct drm_driver takeover_driver = {
++	.driver_features	= DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
++	.fops			= &takeover_fops,
++	/* "exynos" so that Mesa's kmsro pairs this display with panfrost */
++	.name			= "exynos",
++	.desc			= "Exynos8895 DECON takeover of the S-Boot scanout",
++	.major			= 1,
++	.minor			= 0,
++	DRM_GEM_DMA_DRIVER_OPS,
++	DRM_FBDEV_DMA_DRIVER_OPS,
++};
++
++static int takeover_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct exynos_takeover *to;
++	struct resource *res;
++	u32 win_on, size;
++	int ret;
++
++	to = devm_drm_dev_alloc(dev, &takeover_driver, struct exynos_takeover,
++				drm);
++	if (IS_ERR(to))
++		return PTR_ERR(to);
++
++	to->decon = devm_platform_ioremap_resource_byname(pdev, "decon");
++	if (IS_ERR(to->decon))
++		return PTR_ERR(to->decon);
++	to->idma = devm_platform_ioremap_resource_byname(pdev, "idma");
++	if (IS_ERR(to->idma))
++		return PTR_ERR(to->idma);
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "boot-fb");
++	if (!res)
++		return dev_err_probe(dev, -EINVAL, "no boot-fb region\n");
++	to->boot_fb_base = res->start;
++	to->boot_fb_size = resource_size(res);
++
++	/* Refuse to take over anything but the path we verified. */
++	win_on = readl(to->decon + DECON_DATA_PATH_CTRL0);
++	size = readl(to->idma + IDMA_SRC_SIZE);
++	if (!(win_on & BIT(4 * TO_WIN)) ||
++	    size != ((TO_HEIGHT << 16) | TO_WIDTH))
++		return dev_err_probe(dev, -ENODEV,
++				     "S-Boot scanout not found (path %#x, size %#x)\n",
++				     win_on, size);
++	dev_info(dev, "taking over window %d, scanout %#x, frame %u\n", TO_WIN,
++		 readl(to->idma + IDMA_BASE_ADDR_Y),
++		 readl(to->decon + DECON_FRAME_ID));
++
++	/* IDMA BASE_ADDR_Y is 32 bits wide. */
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (ret)
++		return ret;
++
++	ret = aperture_remove_conflicting_devices(to->boot_fb_base,
++						  to->boot_fb_size,
++						  takeover_driver.name);
++	if (ret)
++		return ret;
++
++	ret = takeover_kms_init(to);
++	if (ret)
++		return ret;
++
++	platform_set_drvdata(pdev, &to->drm);
++
++	ret = drm_dev_register(&to->drm, 0);
++	if (ret)
++		return ret;
++
++	drm_client_setup(&to->drm, NULL);
++	return 0;
++}
++
++static void takeover_remove(struct platform_device *pdev)
++{
++	struct drm_device *drm = platform_get_drvdata(pdev);
++
++	drm_dev_unplug(drm);
++	drm_atomic_helper_shutdown(drm);
++}
++
++static void takeover_shutdown(struct platform_device *pdev)
++{
++	drm_atomic_helper_shutdown(platform_get_drvdata(pdev));
++}
++
++static const struct of_device_id takeover_of_match[] = {
++	{ .compatible = "samsung,exynos8895-decon-takeover" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, takeover_of_match);
++
++static struct platform_driver takeover_platform_driver = {
++	.probe = takeover_probe,
++	.remove = takeover_remove,
++	.shutdown = takeover_shutdown,
++	.driver = {
++		.name = "exynos8895-decon-takeover",
++		.of_match_table = takeover_of_match,
++	},
++};
++module_platform_driver(takeover_platform_driver);
++
++MODULE_DESCRIPTION("Exynos8895 DECON takeover of the bootloader scanout");
 +MODULE_LICENSE("GPL");
 diff --git a/drivers/mmc/host/dw_mmc-exynos.c b/drivers/mmc/host/dw_mmc-exynos.c
 index 4b76b997d..9b3141534 100644
