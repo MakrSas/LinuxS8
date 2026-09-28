@@ -209,20 +209,28 @@ cat > /etc/systemd/system/gdm3.service.d/no-restart.conf <<'EOF'
 Restart=no
 EOF
 
-# --- 10. Программный рендеринг -----------------------------------------
-# GPU (Mali-G71) не поддержан ничем: Panfrost его не знает, а собственного
-# драйвера нет. Единственный экран — SimpleDRM. Явно просим llvmpipe, чтобы
-# Mesa не пыталась искать железный драйвер и не падала в неожиданном месте.
-cat > /etc/environment <<'EOF'
+# --- 10. Рендеринг -----------------------------------------------------
+# Phosh рисует на Mali-G71 через panfrost (Mesa из trixie-backports), вывод —
+# SimpleDRM. GTK4-отрисовщик ngl на Bifrost v6 даёт пустые окна, поэтому
+# GTK4 — через cairo (см. docs/HANDOFF.md).
+# GNOME/mutter с panfrost рядом с SimpleDRM падает, поэтому для него — llvmpipe.
+if [ "$LINUX_DESKTOP" = phosh ]; then
+	cat > /etc/environment <<'EOF'
+GSK_RENDERER=cairo
+EOF
+else
+	cat > /etc/environment <<'EOF'
 LIBGL_ALWAYS_SOFTWARE=1
 GALLIUM_DRIVER=llvmpipe
+GSK_RENDERER=cairo
 EOF
-mkdir -p /etc/systemd/system/gdm3.service.d
-cat > /etc/systemd/system/gdm3.service.d/software-gl.conf <<'EOF'
+	mkdir -p /etc/systemd/system/gdm3.service.d
+	cat > /etc/systemd/system/gdm3.service.d/software-gl.conf <<'EOF'
 [Service]
 Environment=LIBGL_ALWAYS_SOFTWARE=1
 Environment=GALLIUM_DRIVER=llvmpipe
 EOF
+fi
 
 # --- 11. Дать GNOME Shell время подняться -------------------------------
 # systemd убивает org.gnome.Shell@wayland.service, если тот не отчитался о

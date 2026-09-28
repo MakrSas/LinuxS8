@@ -225,6 +225,12 @@ deb $MIRROR $SUITE main contrib non-free-firmware
 deb $MIRROR ${SUITE}-updates main contrib non-free-firmware
 deb http://security.debian.org/debian-security ${SUITE}-security main contrib non-free-firmware
 EOF
+# Mesa < 25.2 не узнаёт ревизию Mali-G71 этого телефона; в trixie 25.0.7,
+# в trixie-backports — 26.x. Ставится ниже отдельным шагом.
+if [ "$SUITE" = trixie ]; then
+	echo "deb $MIRROR trixie-backports main contrib non-free-firmware" \
+		>> "$OUT/etc/apt/sources.list"
+fi
 cat > "$OUT/etc/apt/apt.conf.d/99installer" <<'EOF'
 APT::Install-Recommends "false";
 APT::Install-Suggests "false";
@@ -274,6 +280,13 @@ fi
 
 chroot_env apt-get install -y "${COMMON_PACKAGES[@]}" "${DESKTOP_PACKAGES[@]}" \
 	>>"$LOG_FILE" 2>&1
+
+if [ "$SUITE" = trixie ]; then
+	echo ">> ставлю Mesa из trixie-backports (panfrost для Mali-G71)"
+	chroot_env apt-get install -y -t trixie-backports \
+		mesa-libgallium libgl1-mesa-dri libegl-mesa0 libglx-mesa0 libgbm1 \
+		>>"$LOG_FILE" 2>&1
+fi
 
 printf 'en_US.UTF-8 UTF-8\n' > "$OUT/etc/locale.gen"
 echo ">> генерирую локаль и настраиваю систему"

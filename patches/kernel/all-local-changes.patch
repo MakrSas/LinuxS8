@@ -1,8 +1,8 @@
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
-index 305dc72f9..5e738835c 100644
+index 305dc72f9..4c2a4feae 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
 +++ b/arch/arm64/boot/dts/exynos/exynos8895-dreamlte.dts
-@@ -26,6 +26,34 @@ chosen {
+@@ -26,13 +26,52 @@ chosen {
  		#size-cells = <1>;
  		ranges;
  
@@ -37,7 +37,26 @@ index 305dc72f9..5e738835c 100644
  		framebuffer: framebuffer@cc000000 {
  			compatible = "simple-framebuffer";
  			reg = <0 0xcc000000 (1440 * 2960 * 4)>;
-@@ -48,11 +76,20 @@ reserved-memory {
+ 			width = <1440>;
+ 			height = <2960>;
+ 			stride = <(1440 * 4)>;
+-			format = "a8r8g8b8";
++			/*
++			 * x8r8g8b8, а не a8r8g8b8: phoc рисует XRGB8888, и при a8r8g8b8
++			 * simpledrm на каждом кадре гонял попиксельное xrgb->argb
++			 * (drm_fb_xrgb8888_to_argb8888_line, ~20% CPU). Панель альфу не видит.
++			 */
++			format = "x8r8g8b8";
++			/*
++			 * Через memory-region simpledrm делает memremap (обычная память),
++			 * а не ioremap: иначе кадр копируется memcpy_toio по 8 байт, и это
++			 * медленнее, чем старая конверсия формата (замер 2026-09-28).
++			 */
++			memory-region = <&cont_splash_mem>;
+ 		};
+ 	};
+ 
+@@ -48,11 +87,20 @@ reserved-memory {
  		#size-cells = <1>;
  		ranges;
  
@@ -60,7 +79,7 @@ index 305dc72f9..5e738835c 100644
  		};
  
  		cont_splash_mem: framebuffer@cc000000 {
-@@ -100,6 +137,138 @@ reg_placeholder: regulator-0 {
+@@ -100,6 +148,138 @@ reg_placeholder: regulator-0 {
  		compatible = "regulator-fixed";
  		regulator-name = "reg-placeholder";
  	};
@@ -199,7 +218,7 @@ index 305dc72f9..5e738835c 100644
  };
  
  &hsi2c_23 {
-@@ -109,6 +278,42 @@ touchscreen@48 {
+@@ -109,6 +289,42 @@ touchscreen@48 {
  		compatible = "samsung,s6sy761";
  		reg = <0x48>;
  
@@ -242,7 +261,7 @@ index 305dc72f9..5e738835c 100644
  		/* TODO: Update once PMIC is implemented */
  		avdd-supply = <&reg_placeholder>;
  		vdd-supply = <&reg_placeholder>;
-@@ -121,6 +326,86 @@ touchscreen@48 {
+@@ -121,6 +337,86 @@ touchscreen@48 {
  	};
  };
  
@@ -329,7 +348,7 @@ index 305dc72f9..5e738835c 100644
  &oscclk {
  	clock-frequency = <26000000>;
  };
-@@ -129,19 +414,56 @@ &mmc {
+@@ -129,19 +425,56 @@ &mmc {
  	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd2_cd>;
  	pinctrl-names = "default";
  
@@ -391,7 +410,7 @@ index 305dc72f9..5e738835c 100644
  
  	status = "okay";
  };
-@@ -194,3 +516,24 @@ &usi9 {
+@@ -194,3 +527,24 @@ &usi9 {
  	samsung,mode = <USI_MODE_I2C0_1>;
  	status = "okay";
  };
@@ -1702,6 +1721,55 @@ index 9ee051507..743ba43d0 100644
  	}
  
  	dsi->state &= ~DSIM_STATE_CMD_LPM;
+diff --git a/drivers/gpu/drm/drm_gem_shmem_helper.c b/drivers/gpu/drm/drm_gem_shmem_helper.c
+index c989459eb..717816339 100644
+--- a/drivers/gpu/drm/drm_gem_shmem_helper.c
++++ b/drivers/gpu/drm/drm_gem_shmem_helper.c
+@@ -194,6 +194,12 @@ void drm_gem_shmem_release(struct drm_gem_shmem_object *shmem)
+ 	struct drm_gem_object *obj = &shmem->base;
+ 
+ 	if (drm_gem_is_imported(obj)) {
++		if (shmem->vaddr) {
++			struct iosys_map map = IOSYS_MAP_INIT_VADDR(shmem->vaddr);
++
++			dma_buf_vunmap_unlocked(obj->import_attach->dmabuf, &map);
++			shmem->vaddr = NULL;
++		}
+ 		drm_prime_gem_destroy(obj, shmem->sgt);
+ 	} else {
+ 		dma_resv_lock(shmem->base.resv, NULL);
+@@ -395,7 +401,20 @@ int drm_gem_shmem_vmap_locked(struct drm_gem_shmem_object *shmem,
+ 	dma_resv_assert_held(obj->resv);
+ 
+ 	if (drm_gem_is_imported(obj)) {
++		/*
++		 * simpledrm vmaps the imported scanout buffer on every commit
++		 * (drm_gem_begin_shadow_fb_access) and vunmaps it right after.
++		 * For a 1440x2960 panfrost buffer that is ~4200 pages mapped and
++		 * torn down per frame. Keep the first mapping until the object
++		 * is released; shmem->vaddr is otherwise unused for imports.
++		 */
++		if (shmem->vaddr) {
++			iosys_map_set_vaddr(map, shmem->vaddr);
++			return 0;
++		}
+ 		ret = dma_buf_vmap(obj->import_attach->dmabuf, map);
++		if (!ret && !map->is_iomem)
++			shmem->vaddr = map->vaddr;
+ 	} else {
+ 		pgprot_t prot = PAGE_KERNEL;
+ 
+@@ -459,7 +478,9 @@ void drm_gem_shmem_vunmap_locked(struct drm_gem_shmem_object *shmem,
+ 	dma_resv_assert_held(obj->resv);
+ 
+ 	if (drm_gem_is_imported(obj)) {
+-		dma_buf_vunmap(obj->import_attach->dmabuf, map);
++		/* the cached mapping is dropped in drm_gem_shmem_release() */
++		if (!shmem->vaddr || map->is_iomem || map->vaddr != shmem->vaddr)
++			dma_buf_vunmap(obj->import_attach->dmabuf, map);
+ 	} else {
+ 		dma_resv_assert_held(shmem->base.resv);
+ 
 diff --git a/drivers/gpu/drm/exynos/Kconfig b/drivers/gpu/drm/exynos/Kconfig
 index a59131ae1..ee3a41b06 100644
 --- a/drivers/gpu/drm/exynos/Kconfig

@@ -2739,3 +2739,23 @@ MAX77865: ток и температура больше не путаются с
 Открыто: MAC интерфейса случайный (NVRAM macaddr не применился), P2P-iface
 не создаётся, flush кэша UFS, BAR/ATU-переназначение из модуля — перенести
 в ядро.
+
+## 2026-09-28 · Композиция на GPU и быстрая копия кадра simpledrm
+
+- Mesa 26.1.6 из trixie-backports (25.0.7 не знает ревизию G71): phoc
+  рисует на `Mali-G71 MC20 (Panfrost)`, GLES 3.1. В `/etc/environment`
+  вместо `LIBGL_ALWAYS_SOFTWARE`/llvmpipe — только `GSK_RENDERER=cairo`
+  (GNOME остаётся на llvmpipe). Установщик ставит Mesa из backports.
+- Профиль (perf -a, прокрутка + glmark2): основной расход — kworker коммита
+  simpledrm: попиксельный `drm_fb_xrgb8888_to_argb8888_line` (~20% CPU),
+  плюс vmap/vunmap импортированного буфера panfrost на каждом кадре.
+- Исправления в ядре/DT:
+  - framebuffer `x8r8g8b8` вместо `a8r8g8b8` — формат совпадает с phoc;
+  - `memory-region = <&cont_splash_mem>` — simpledrm делает memremap, копия
+    идёт обычным memcpy, а не `memcpy_toio` по 8 байт (без этого x8r8g8b8
+    даже медленнее: 46 fps против 60);
+  - drm_gem_shmem: vmap импортированного объекта кэшируется до release.
+- glmark2 во весь экран (texture/build): **60 → 86–91 fps**, кадр
+  16.8 → 11 мс, kworker коммита 36% → ~3% CPU.
+- Узкие места дальше: клиенты GTK рисуют процессором (cairo), нет vsync,
+  копия кадра всё ещё есть — следующий шаг native DECON.
